@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard | Mass Email Sender</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; display: flex; }
+        .sidebar { width: 250px; background: #343a40; padding: 20px; height: 100vh; color: white; }
+        .sidebar a { display: block; color: white; padding: 10px; text-decoration: none; margin: 10px 0; background: #007bff; border-radius: 5px; text-align: center; }
+        .sidebar a:hover { background: #0056b3; }
+        .content { flex-grow: 1; padding: 20px; }
+        h2 { text-align: center; }
+        form { max-width: 600px; margin: auto; padding: 20px; border-radius: 10px; background: #f9f9f9; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1); }
+        label { font-weight: bold; display: block; margin-top: 10px; }
+        input, textarea, button { width: 100%; margin: 5px 0; padding: 8px; border: 1px solid #ccc; border-radius: 5px; }
+        button { background: #007bff; color: white; border: none; cursor: pointer; margin-top: 15px; }
+        button:hover { background: #0056b3; }
+        .alert { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .success { background-color: #d4edda; color: #155724; }
+        .error { background-color: #f8d7da; color: #721c24; }
+        .warning { background-color: #fff3cd; color: #856404; }
+        .info { background-color: #d1ecf1; color: #0c5460; }
+        input[type="file"] { padding: 10px; background-color: #f1f1f1; }
+        .file-info { margin-top: 5px; font-size: 0.8em; color: #666; }
+        .section-title { margin-top: 20px; padding-top: 10px; border-top: 1px solid #ddd; }
+        .checkbox-container { 
+            display: flex; 
+            align-items: center;
+            margin: 10px 0;
+        }
+        input[type="checkbox"] {
+            width: auto;
+            margin-right: 10px;
+        }
+        .followup-options {
+            margin-top: 10px;
+            padding: 15px;
+            background-color: #f0f0f0;
+            border-radius: 5px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="sidebar">
+    <h3>Dashboard</h3>
+    <a href="/">Home</a>
+    <a href="/dashboard">Mass Email Sender</a>
+    <a href="/emails">Email Tracking</a>
+</div>
+
+<div class="content">
+    <h2>Mass Email Sender</h2>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert {{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+
+    <form action="/dashboard" method="POST" enctype="multipart/form-data">
+        <h3 class="section-title">Email Content</h3>
+        <label for="subject">Email Subject:</label>
+        <input type="text" name="subject" required>
+
+        <label for="body">Email Body:</label>
+        <textarea name="body" rows="5" required></textarea>
+        
+        <div class="checkbox-container">
+            <input type="checkbox" id="enable-followup" name="enable-followup">
+            <label for="enable-followup">Enable Follow-up Email</label>
+        </div>
+        
+        <div id="followup-options" class="followup-options">
+            <div class="checkbox-container">
+                <input type="checkbox" id="use-days" name="use-days" checked>
+                <label for="use-days">Use Days Offset</label>
+            </div>
+            
+            <div id="days-option">
+                <label for="followup_days">Send follow-up after (days):</label>
+                <input type="number" name="followup_days" min="1" value="3">
+            </div>
+            
+            <div id="datetime-option" style="display: none;">
+                <label for="followup_datetime">Send follow-up on (specific date/time):</label>
+                <input type="datetime-local" name="followup_datetime">
+            </div>
+            
+            <label for="followup_body">Follow-up Message:</label>
+            <textarea name="followup_body" rows="4" placeholder="Enter your follow-up message here"></textarea>
+        </div>
+
+        <h3 class="section-title">Files</h3>
+        <label for="xlsx_file">Recipients Excel File (must have 'name' and 'email' columns):</label>
+        <input type="file" name="xlsx_file" accept=".xlsx" required>
+        <div class="file-info">Upload an Excel file with recipient information</div>
+
+        <label for="login_file">Login Credentials Excel File (must have 'email' and 'password' columns):</label>
+        <input type="file" name="login_file" accept=".xlsx" required>
+        <div class="file-info">Upload an Excel file with sender email credentials</div>
+
+        <label for="attachments">Attach Files (optional):</label>
+        <input type="file" name="attachments" multiple accept=".xlsx,.txt,.pdf,.png,.jpg,.jpeg,.gif">
+        <div class="file-info">Allowed formats: .xlsx, .txt, .pdf, .png, .jpg, .jpeg, .gif</div>
+
+        <button type="submit">Send Emails</button>
+    </form>
+</div>
+
+<script>
+    // Toggle follow-up options visibility
+    document.getElementById('enable-followup').addEventListener('change', function() {
+        const followupOptions = document.getElementById('followup-options');
+        followupOptions.style.display = this.checked ? 'block' : 'none';
+        
+        // Make fields required when checkbox is checked
+        const followupDays = document.querySelector('input[name="followup_days"]');
+        const followupDatetime = document.querySelector('input[name="followup_datetime"]');
+        const followupBody = document.querySelector('textarea[name="followup_body"]');
+        
+        if (this.checked) {
+            followupBody.setAttribute('required', '');
+            if (document.getElementById('use-days').checked) {
+                followupDays.setAttribute('required', '');
+                followupDatetime.removeAttribute('required');
+            } else {
+                followupDatetime.setAttribute('required', '');
+                followupDays.removeAttribute('required');
+            }
+        } else {
+            followupDays.removeAttribute('required');
+            followupDatetime.removeAttribute('required');
+            followupBody.removeAttribute('required');
+        }
+    });
+    
+    // Toggle between days offset and specific datetime
+    document.getElementById('use-days').addEventListener('change', function() {
+        const daysOption = document.getElementById('days-option');
+        const datetimeOption = document.getElementById('datetime-option');
+        const followupDays = document.querySelector('input[name="followup_days"]');
+        const followupDatetime = document.querySelector('input[name="followup_datetime"]');
+        
+        if (this.checked) {
+            daysOption.style.display = 'block';
+            datetimeOption.style.display = 'none';
+            followupDays.setAttribute('required', '');
+            followupDatetime.removeAttribute('required');
+        } else {
+            daysOption.style.display = 'none';
+            datetimeOption.style.display = 'block';
+            followupDatetime.setAttribute('required', '');
+            followupDays.removeAttribute('required');
+            
+            // Set default datetime to tomorrow
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            tomorrow.setMinutes(tomorrow.getMinutes() - tomorrow.getTimezoneOffset());
+            followupDatetime.value = tomorrow.toISOString().slice(0, 16);
+        }
+    });
+
+    // Show selected files for attachments
+    document.querySelector('input[name="attachments"]').addEventListener('change', function(e) {
+        const fileInfo = this.nextElementSibling;
+        if (this.files.length > 0) {
+            const fileNames = Array.from(this.files).map(file => file.name).join(', ');
+            fileInfo.innerHTML = `Selected files: ${fileNames}`;
+        } else {
+            fileInfo.innerHTML = 'Allowed formats: .xlsx, .txt, .pdf, .png, .jpg, .jpeg, .gif';
+        }
+    });
+
+    // Show selected file for recipients excel
+    document.querySelector('input[name="xlsx_file"]').addEventListener('change', function(e) {
+        const fileInfo = this.nextElementSibling;
+        if (this.files.length > 0) {
+            fileInfo.innerHTML = `Selected file: ${this.files[0].name}`;
+        } else {
+            fileInfo.innerHTML = 'Upload an Excel file with recipient information';
+        }
+    });
+
+    // Show selected file for login excel
+    document.querySelector('input[name="login_file"]').addEventListener('change', function(e) {
+        const fileInfo = this.nextElementSibling;
+        if (this.files.length > 0) {
+            fileInfo.innerHTML = `Selected file: ${this.files[0].name}`;
+        } else {
+            fileInfo.innerHTML = 'Upload an Excel file with sender email credentials';
+        }
+    });
+</script>
+
+</body>
+</html>

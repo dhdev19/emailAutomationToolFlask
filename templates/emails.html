@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Email Tracking | Mass Email Sender</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; display: flex; }
+        .sidebar { width: 250px; background: #343a40; padding: 20px; height: 100vh; color: white; }
+        .sidebar a { display: block; color: white; padding: 10px; text-decoration: none; margin: 10px 0; background: #007bff; border-radius: 5px; text-align: center; }
+        .sidebar a:hover { background: #0056b3; }
+        .content { flex-grow: 1; padding: 20px; overflow-y: auto; }
+        h2 { text-align: center; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background-color: #f2f2f2; position: sticky; top: 0; }
+        tr:hover { background-color: #f5f5f5; }
+        .status-indicator { 
+            display: inline-block; 
+            width: 12px; 
+            height: 12px; 
+            border-radius: 50%; 
+            margin-right: 5px; 
+        }
+        .status-sent { background-color: #28a745; }
+        .status-pending { background-color: #ffc107; }
+        .status-none { background-color: #6c757d; }
+        .ellipsis {
+            max-width: 200px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .actions {
+            text-align: center;
+        }
+        .actions button {
+            padding: 5px 10px;
+            margin: 0 5px;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+        .view-btn { background-color: #17a2b8; color: white; }
+        .refresh {
+            margin-bottom: 20px;
+            text-align: right;
+        }
+        .refresh-btn {
+            padding: 8px 15px;
+            background-color: #6c757d;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .refresh-btn:hover {
+            background-color: #5a6268;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            overflow: auto;
+            background-color: rgba(0,0,0,0.4);
+        }
+        .modal-content {
+            background-color: #fefefe;
+            margin: 10% auto;
+            padding: 20px;
+            border: 1px solid #888;
+            width: 80%;
+            max-width: 600px;
+            border-radius: 5px;
+        }
+        .close {
+            color: #aaa;
+            float: right;
+            font-size: 28px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .close:hover {
+            color: black;
+        }
+        .modal-header {
+            border-bottom: 1px solid #ddd;
+            padding-bottom: 10px;
+            margin-bottom: 15px;
+        }
+        .modal-body p {
+            margin: 10px 0;
+        }
+        .modal-label {
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+
+<div class="sidebar">
+    <h3>Email Tracker</h3>
+    <a href="/">Home</a>
+    <a href="/dashboard">Mass Email Sender</a>
+    <a href="/emails">Email Tracking</a>
+</div>
+
+<div class="content">
+    <h2>Email Tracking</h2>
+    
+    <div class="refresh">
+        <button class="refresh-btn" onclick="window.location.reload();">Refresh Data</button>
+    </div>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Sender Email</th>
+                <th>Recipient</th>
+                <th>Subject</th>
+                <th>Sent Date</th>
+                <th>Follow-up Date</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for email in emails %}
+            <tr>
+                <td>{{ email.sender_email }}</td>
+                <td>{{ email.recipient_name }} ({{ email.recipient_email }})</td>
+                <td class="ellipsis">{{ email.subject }}</td>
+                <td>{{ email.sent_date }}</td>
+                <td>{{ email.followup_date if email.followup_date else 'No follow-up' }}</td>
+                <td>
+                    {% if email.followup_date %}
+                        {% if email.followup_sent == 1 %}
+                            <span class="status-indicator status-sent"></span> Follow-up sent
+                        {% else %}
+                            <span class="status-indicator status-pending"></span> Pending
+                        {% endif %}
+                    {% else %}
+                        <span class="status-indicator status-none"></span> No follow-up
+                    {% endif %}
+                </td>
+                <td class="actions">
+                    <button class="view-btn" onclick="viewEmailDetails({{ email.id }}, '{{ email.sender_email }}', '{{ email.recipient_email }}', '{{ email.recipient_name }}', '{{ email.subject|replace("'", "\\'") }}', '{{ email.body|replace("'", "\\'") }}', '{{ email.sent_date }}', '{{ email.followup_date if email.followup_date else 'No follow-up' }}', '{{ email.followup_sent }}', '{{ email.followup_body|replace("'", "\\'") if email.followup_body else 'None' }}')">View</button>
+                    
+                    {% if email.followup_date and email.followup_sent == 0 and email.followup_body %}
+                    <a href="/send-followup/{{ email.id }}" class="send-btn" style="background-color: #28a745; color: white; padding: 5px 10px; text-decoration: none; border-radius: 3px; display: inline-block; margin-left: 5px;">Send Now</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Email Details Modal -->
+    <div id="emailModal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <div class="modal-header">
+                <h3 id="modalSubject"></h3>
+            </div>
+            <div class="modal-body">
+                <p><span class="modal-label">Sender:</span> <span id="modalSender"></span></p>
+                <p><span class="modal-label">To:</span> <span id="modalRecipient"></span></p>
+                <p><span class="modal-label">Sent on:</span> <span id="modalSentDate"></span></p>
+                <p><span class="modal-label">Message:</span></p>
+                <div id="modalBody" style="background: #f9f9f9; padding: 10px; border-radius: 5px; margin: 10px 0; white-space: pre-wrap;"></div>
+                
+                <div id="followupSection">
+                    <h4>Follow-up Information</h4>
+                    <p><span class="modal-label">Follow-up Date:</span> <span id="modalFollowupDate"></span></p>
+                    <p><span class="modal-label">Status:</span> <span id="modalFollowupStatus"></span></p>
+                    <p><span class="modal-label">Follow-up Message:</span></p>
+                    <div id="modalFollowupBody" style="background: #f9f9f9; padding: 10px; border-radius: 5px; margin: 10px 0; white-space: pre-wrap;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Modal functionality
+    var modal = document.getElementById("emailModal");
+    var closeBtn = document.getElementsByClassName("close")[0];
+    
+    function viewEmailDetails(id, sender, recipient_email, recipient_name, subject, body, sent_date, followup_date, followup_sent, followup_body) {
+        document.getElementById("modalSubject").textContent = subject;
+        document.getElementById("modalSender").textContent = sender;
+        document.getElementById("modalRecipient").textContent = recipient_name + " (" + recipient_email + ")";
+        document.getElementById("modalSentDate").textContent = sent_date;
+        document.getElementById("modalBody").textContent = body;
+        
+        var followupSection = document.getElementById("followupSection");
+        
+        if (followup_date === 'No follow-up') {
+            followupSection.style.display = 'none';
+        } else {
+            followupSection.style.display = 'block';
+            document.getElementById("modalFollowupDate").textContent = followup_date;
+            
+            var statusText = followup_sent == 1 ? 'Sent' : 'Pending';
+            document.getElementById("modalFollowupStatus").textContent = statusText;
+            
+            document.getElementById("modalFollowupBody").textContent = followup_body === 'None' ? 'No message' : followup_body;
+        }
+        
+        modal.style.display = "block";
+    }
+    
+    closeBtn.onclick = function() {
+        modal.style.display = "none";
+    }
+    
+    window.onclick = function(event) {
+        if (event.target == modal) {
+            modal.style.display = "none";
+        }
+    }
+</script>
+
+</body>
+</html> 
