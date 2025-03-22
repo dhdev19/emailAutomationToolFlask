@@ -13,6 +13,9 @@ import sqlite3
 import pytz
 from threading import Event
 
+# Global variable to track if scheduler is already running
+scheduler_running = False
+
 # Check if running on Render
 if 'RENDER' in os.environ:
     # Use Render disk path if disk is mounted
@@ -300,12 +303,9 @@ def dashboard():
 
         conn.close()
         
-        # Start the followup scheduler if needed
-        if has_followup:
-            scheduler_thread = threading.Thread(target=followup_scheduler)
-            scheduler_thread.daemon = True
-            scheduler_thread.start()
-            
+        # We no longer need to start the scheduler here
+        # It's already started from wsgi.py
+        
         flash(f"Email sending complete: {emails_sent} sent, {errors} failed", "success")
         if has_followup:
             if use_days:
@@ -321,7 +321,10 @@ def dashboard():
 def followup_scheduler():
     """Background thread to check and send follow-up emails"""
     print("Follow-up scheduler started")
+    loop_count = 0
     while True:
+        loop_count += 1
+        print(f"Scheduler check #{loop_count} at {datetime.now()}")
         try:
             # Connect to database
             conn = sqlite3.connect(DB_PATH)
@@ -331,10 +334,23 @@ def followup_scheduler():
             # Current time
             now = datetime.now()
             current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"Current time for comparison: {current_time}")
+            
+            # Check if database exists and has the expected structure
+            try:
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='emails'")
+                if not c.fetchone():
+                    print("Error: 'emails' table does not exist in the database.")
+                    time.sleep(60)
+                    continue
+            except Exception as db_err:
+                print(f"Database structure check error: {str(db_err)}")
+                time.sleep(60)
+                continue
             
             # Find emails that need follow-up
             c.execute('''
-                SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body 
+                SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body, followup_date
                 FROM emails 
                 WHERE followup_date <= ? 
                 AND followup_sent = 0
@@ -344,6 +360,24 @@ def followup_scheduler():
             emails_to_followup = c.fetchall()
             print(f"Found {len(emails_to_followup)} emails due for follow-up")
             
+            # Debug: Show all pending follow-ups regardless of date
+            c.execute('''
+                SELECT id, followup_date, followup_sent
+                FROM emails 
+                WHERE followup_sent = 0
+                AND followup_body IS NOT NULL
+            ''')
+            pending = c.fetchall()
+            print(f"All pending follow-ups in system: {len(pending)}")
+            for p in pending:
+                print(f"  - ID: {p['id']}, Date: {p['followup_date']}, Sent: {p['followup_sent']}")
+                
+                # Compare with current time to see if they should be sent
+                if p['followup_date'] <= current_time:
+                    print(f"  - Email ID {p['id']} SHOULD be sent now")
+                else:
+                    print(f"  - Email ID {p['id']} not yet due (scheduled for {p['followup_date']})")
+            
             for email in emails_to_followup:
                 email_id = email['id']
                 sender_email = email['sender_email']
@@ -352,6 +386,7 @@ def followup_scheduler():
                 recipient_name = email['recipient_name']
                 subject = email['subject']
                 followup_body = email['followup_body']
+                followup_date = email['followup_date']
                 
                 print(f"Sending follow-up to {recipient_email} from {sender_email}")
                 
@@ -408,11 +443,19 @@ def followup_scheduler():
 
 # Create a separate function to manage the single global instance of the scheduler
 def start_scheduler():
-    # Start the followup scheduler in a background thread
-    scheduler_thread = threading.Thread(target=followup_scheduler)
-    scheduler_thread.daemon = True
-    scheduler_thread.start()
-    print("Scheduler thread started")
+    global scheduler_running
+    print("start_scheduler function called")
+    
+    # Only start if not already running
+    if not scheduler_running:
+        # Start the followup scheduler in a background thread
+        scheduler_thread = threading.Thread(target=followup_scheduler)
+        scheduler_thread.daemon = True
+        scheduler_thread.start()
+        scheduler_running = True
+        print("Scheduler thread started")
+    else:
+        print("Scheduler already running, not starting a new thread")
 
 @app.route('/emails')
 def view_emails():
@@ -508,6 +551,151 @@ def send_followup(email_id):
     except Exception as e:
         flash(f"Error processing follow-up: {str(e)}", "error")
         return redirect('/emails')
+
+@app.route('/check-followups')
+def check_followups():
+    """Manually check for follow-ups that need to be sent"""
+    try:
+        # Connect to database
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        
+        # Current time
+        now = datetime.now()
+        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Find emails that need follow-up
+        c.execute('''
+            SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body 
+            FROM emails 
+            WHERE followup_date <= ? 
+            AND followup_sent = 0
+            AND followup_body IS NOT NULL
+        ''', (current_time,))
+        
+        emails_to_followup = c.fetchall()
+        sent_count = 0
+        errors = []
+        
+        for email in emails_to_followup:
+            email_id = email['id']
+            sender_email = email['sender_email']
+            sender_password = email['sender_password']
+            recipient_email = email['recipient_email']
+            recipient_name = email['recipient_name']
+            subject = email['subject']
+            followup_body = email['followup_body']
+            
+            try:
+                # Create a new Flask app context for mail
+                with app.app_context():
+                    # Configure mail for this sender
+                    mail_config = {
+                        'MAIL_SERVER': 'smtp.gmail.com',
+                        'MAIL_PORT': 587,
+                        'MAIL_USE_TLS': True,
+                        'MAIL_USE_SSL': False,
+                        'MAIL_USERNAME': sender_email,
+                        'MAIL_PASSWORD': sender_password,  # Use stored password from database
+                        'MAIL_DEFAULT_SENDER': sender_email
+                    }
+                    
+                    # Create a new mail instance with this config
+                    mail_app = Flask(f"mail_app_{email_id}")
+                    for key, value in mail_config.items():
+                        mail_app.config[key] = value
+                    
+                    with mail_app.app_context():
+                        mail_instance = Mail(mail_app)
+                        
+                        # Create follow-up message
+                        followup_subject = f"Follow-up: {subject}"
+                        msg = Message(followup_subject, recipients=[recipient_email])
+                        msg.body = f"Hello {recipient_name},\n\n{followup_body}"
+                        
+                        # Send follow-up email
+                        mail_instance.send(msg)
+                        
+                        # Update database
+                        c.execute('''
+                            UPDATE emails 
+                            SET followup_sent = 1 
+                            WHERE id = ?
+                        ''', (email_id,))
+                        conn.commit()
+                        sent_count += 1
+            except Exception as e:
+                errors.append(f"Error sending follow-up to {recipient_email}: {str(e)}")
+        
+        conn.close()
+        
+        if sent_count > 0:
+            flash(f"Manually sent {sent_count} follow-up emails", "success")
+        
+        if errors:
+            for error in errors:
+                flash(error, "error")
+        
+        if sent_count == 0 and not errors:
+            flash("No follow-up emails needed to be sent at this time", "info")
+        
+    except Exception as e:
+        flash(f"Error checking follow-ups: {str(e)}", "error")
+    
+    return redirect('/server-status')
+
+@app.route('/server-status')
+def server_status():
+    """View server status, including scheduler status"""
+    # Gather information
+    status = {
+        'scheduler_running': scheduler_running,
+        'server_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'database_path': DB_PATH
+    }
+    
+    # Check database connection
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        
+        # Check emails table
+        c.execute("SELECT COUNT(*) FROM emails")
+        total_emails = c.fetchone()[0]
+        status['total_emails'] = total_emails
+        
+        # Check pending follow-ups
+        c.execute("SELECT COUNT(*) FROM emails WHERE followup_date IS NOT NULL AND followup_sent = 0")
+        pending_followups = c.fetchone()[0]
+        status['pending_followups'] = pending_followups
+        
+        # Get list of pending follow-ups
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute('''
+            SELECT id, sender_email, recipient_email, followup_date, sent_date
+            FROM emails 
+            WHERE followup_date IS NOT NULL AND followup_sent = 0
+            ORDER BY followup_date
+        ''')
+        status['pending_followups_list'] = [dict(row) for row in c.fetchall()]
+        
+        # Check past due follow-ups
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute('''
+            SELECT COUNT(*) FROM emails 
+            WHERE followup_date <= ? AND followup_sent = 0
+        ''', (current_time,))
+        past_due = c.fetchone()[0]
+        status['past_due_followups'] = past_due
+        
+        conn.close()
+        status['database_connection'] = 'success'
+    except Exception as e:
+        status['database_connection'] = f'error: {str(e)}'
+    
+    return render_template('server_status.html', status=status)
 
 if __name__ == '__main__':
     # Start the background scheduler

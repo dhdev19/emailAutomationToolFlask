@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}Server Status{% endblock %}
+
+{% block content %}
+<div class="container">
+    <h1>Server Status</h1>
+    
+    <div class="status-card">
+        <h2>General Information</h2>
+        <table>
+            <tr>
+                <th>Scheduler Running:</th>
+                <td>{{ status.scheduler_running }}</td>
+            </tr>
+            <tr>
+                <th>Server Time:</th>
+                <td>{{ status.server_time }}</td>
+            </tr>
+            <tr>
+                <th>Database Path:</th>
+                <td>{{ status.database_path }}</td>
+            </tr>
+            <tr>
+                <th>Database Connection:</th>
+                <td>{{ status.database_connection }}</td>
+            </tr>
+        </table>
+    </div>
+    
+    <div class="status-card">
+        <h2>Email Statistics</h2>
+        <table>
+            <tr>
+                <th>Total Emails:</th>
+                <td>{{ status.total_emails }}</td>
+            </tr>
+            <tr>
+                <th>Pending Follow-ups:</th>
+                <td>{{ status.pending_followups }}</td>
+            </tr>
+            <tr>
+                <th>Past Due Follow-ups:</th>
+                <td>{{ status.past_due_followups }}</td>
+            </tr>
+        </table>
+    </div>
+    
+    {% if status.pending_followups_list %}
+    <div class="status-card">
+        <h2>Pending Follow-ups</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Sender</th>
+                    <th>Recipient</th>
+                    <th>Original Sent Date</th>
+                    <th>Follow-up Date</th>
+                    <th>Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for followup in status.pending_followups_list %}
+                <tr>
+                    <td>{{ followup.id }}</td>
+                    <td>{{ followup.sender_email }}</td>
+                    <td>{{ followup.recipient_email }}</td>
+                    <td>{{ followup.sent_date }}</td>
+                    <td>{{ followup.followup_date }}</td>
+                    <td>
+                        {% if followup.followup_date <= status.server_time %}
+                        <span style="color: red; font-weight: bold;">Past Due</span>
+                        {% else %}
+                        <span style="color: green;">Scheduled</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+    
+    <div class="status-card">
+        <h2>Actions</h2>
+        <div class="action-buttons">
+            <a href="/check-followups" class="action-button">Force Check Follow-ups</a>
+            <a href="/emails" class="action-button">View All Emails</a>
+            <a href="/dashboard" class="action-button">Return to Dashboard</a>
+        </div>
+    </div>
+</div>
+
+<style>
+    .container {
+        max-width: 1200px;
+        margin: 0 auto;
+        padding: 20px;
+    }
+    
+    .status-card {
+        background-color: white;
+        border-radius: 8px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        margin-bottom: 20px;
+        padding: 20px;
+    }
+    
+    table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+    
+    th, td {
+        padding: 10px;
+        text-align: left;
+        border-bottom: 1px solid #eee;
+    }
+    
+    th {
+        width: 30%;
+        font-weight: bold;
+    }
+    
+    .action-buttons {
+        display: flex;
+        gap: 10px;
+        margin-top: 10px;
+    }
+    
+    .action-button {
+        display: inline-block;
+        background-color: #007bff;
+        color: white;
+        padding: 10px 15px;
+        border-radius: 4px;
+        text-decoration: none;
+        transition: background-color 0.3s;
+    }
+    
+    .action-button:hover {
+        background-color: #0056b3;
+    }
+</style>
+{% endblock %} 
