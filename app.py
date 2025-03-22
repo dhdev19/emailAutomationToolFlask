@@ -13,13 +13,27 @@ import sqlite3
 import pytz
 from threading import Event
 
+# Check if running on Render
+if 'RENDER' in os.environ:
+    # Use Render disk path if disk is mounted
+    base_path = "/opt/render/project/src/data" if os.path.exists("/opt/render/project/src/data") else "/opt/render/project/src"
+else:
+    # Use local paths for development
+    base_path = "."
 
+# Configure paths based on environment
+UPLOAD_FOLDER = os.path.join(base_path, "uploads")
+DB_FOLDER = os.path.join(base_path, "database")
+
+# Create directories if they don't exist
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(DB_FOLDER, exist_ok=True)
+
+# Initialize Flask app
 app = Flask(__name__)
 app.secret_key = 'your_secret_key'  # Change this
 
 # Configure file upload folder
-UPLOAD_FOLDER = "uploads"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # Flask-Mail Configuration
@@ -33,9 +47,7 @@ app.config['MAIL_DEFAULT_SENDER'] = 'default_email@example.com'
 
 mail = Mail(app)
 
-# Create a database directory for persistent storage
-DB_FOLDER = "database"
-os.makedirs(DB_FOLDER, exist_ok=True)
+# Set path for database file
 DB_PATH = os.path.join(DB_FOLDER, "emails.db")
 
 # Create SQLite database for tracking emails
@@ -70,6 +82,7 @@ def init_db():
     
     conn.commit()
     conn.close()
+    print(f"Database initialized at {DB_PATH}")
 
 # Initialize database
 init_db()

@@ -12,13 +12,34 @@ An application for sending bulk emails with follow-up scheduling capabilities.
 
 ## Deployment on Render
 
+### Option 1: Quick Deployment (Recommended)
+
+1. Fork this repository on GitHub
+2. Sign up for Render (https://render.com)
+3. In Render dashboard, click "New" and select "Blueprint"
+4. Select your forked repository
+5. Render will automatically configure everything from the render.yaml file:
+   - Creates a web service with Python environment
+   - Sets up a 1GB persistent disk for data storage
+   - Generates a random SECRET_KEY
+   - Runs the setup.py script to prepare directories
+
+### Option 2: Manual Setup
+
 1. Create a new Web Service on Render
 2. Connect your GitHub repository
 3. Use the following settings:
-   - Build Command: `pip install -r requirements.txt`
+   - Environment: Python
+   - Python Version: 3.10 (specified in the "Environment Variables" section)
+   - Build Command: `pip install -r requirements.txt && python setup.py`
    - Start Command: `gunicorn wsgi:app`
 4. Set up environment variables:
-   - SECRET_KEY: A random string for app security
+   - `SECRET_KEY`: A random string for app security (use Render's "Generate" feature)
+   - `PYTHON_VERSION`: 3.10.13
+5. Add a disk in the Render "Disks" section:
+   - Name: data
+   - Mount Path: `/opt/render/project/src/data`
+   - Size: 1GB minimum
 
 ## Email Credentials
 
@@ -47,4 +68,13 @@ Must contain columns:
 ### Login Credentials Excel File
 Must contain columns:
 - `email` - Sender's email address
-- `password` - Sender's app password (for Gmail) 
+- `password` - Sender's app password (for Gmail)
+
+## Troubleshooting Deployment
+
+If you encounter any issues during deployment:
+
+1. Check the Render logs for detailed error messages
+2. Ensure the disk is properly mounted by checking the logs
+3. Verify that your Python version is set to 3.10.x
+4. If you're still having trouble, try redeploying the service 
