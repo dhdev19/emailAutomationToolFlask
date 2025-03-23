@@ -1,14 +1,28 @@
 """WSGI entry point"""
 # Import the Flask app and scheduler
-from app import app, start_scheduler
-import threading
+import os
+import sys
+import logging
 
-# Start the scheduler in a separate thread when wsgi is imported
-# This ensures follow-up emails are checked and sent
-scheduler_thread = threading.Thread(target=start_scheduler)
-scheduler_thread.daemon = True
-scheduler_thread.start()
+# Add your application directory to path
+sys.path.insert(0, '/home/username/yourappfolder')
+
+# Set production environment variable
+os.environ['FLASK_ENV'] = 'production'
+os.environ['HOSTINGER'] = 'true'
+
+# Import the app after setting environment variables
+from app import app, configure_logging, start_scheduler
+
+# Set up logging
+configure_logging()
+
+# Start the scheduler in a background thread
+start_scheduler()
+
+# Application for WSGI servers
+application = app
 
 # This is only used when running this file directly
 if __name__ == "__main__":
-    app.run() 
+    application.run() 

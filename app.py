@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, flash, jsonify, session, url_for
+from flask import Flask, render_template, request, redirect, flash, jsonify, session, url_for, abort
 import os
 from dotenv import load_dotenv
 import pandas as pd
@@ -21,17 +21,30 @@ import hashlib
 import functools
 import smtplib
 from email.mime.text import MIMEText
+import logging
+from logging.handlers import RotatingFileHandler
+import pymysql
+from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, Boolean, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, relationship
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_wtf.csrf import CSRFProtect
+from email.mime.base import MIMEBase
+from email import encoders
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Global variables for scheduler status and timing
-scheduler_running = False
-scheduler_start_time = None
-scheduler_last_check = None
+# Configure environment-specific settings
+is_production = os.environ.get('FLASK_ENV') == 'production'
+is_on_hostinger = os.environ.get('HOSTINGER') == 'true'
 
-# Check if running on Render
-if 'RENDER' in os.environ:
+# Configure paths based on environment
+if is_on_hostinger:
+    base_path = os.environ.get('HOSTINGER_DATA_PATH', '/home/username/data')
+elif 'RENDER' in os.environ:
     base_path = "/opt/render/project/src/data" if os.path.exists("/opt/render/project/src/data") else "/opt/render/project/src"
 else:
     base_path = "."
@@ -39,25 +52,47 @@ else:
 # Configure paths based on environment
 UPLOAD_FOLDER = os.path.join(base_path, "uploads")
 DB_FOLDER = os.path.join(base_path, "database")
+LOG_FOLDER = os.path.join(base_path, "logs")
+
+# Create directories if they don't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(DB_FOLDER, exist_ok=True)
+os.makedirs(LOG_FOLDER, exist_ok=True)
 
 # Initialize Flask app
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', 'your_secret_key_change_this')
+app.secret_key = os.environ.get('SECRET_KEY')
+if not app.secret_key:
+    if is_production:
+        raise ValueError("SECRET_KEY environment variable must be set in production")
+    else:
+        app.secret_key = 'dev_secret_key_for_testing_only'
+
 app.config['SESSION_TYPE'] = 'filesystem'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # Configure Razorpay
-RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', 'rzp_test_your_test_key')
-RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', 'your_test_secret')
+RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID')
+RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET')
+
+if not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET):
+    if is_production:
+        raise ValueError("Razorpay credentials must be set in production")
+    else:
+        RAZORPAY_KEY_ID = 'rzp_test_dummy_key'
+        RAZORPAY_KEY_SECRET = 'dummy_secret'
+
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
 # Admin email (used to send login credentials)
-ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@example.com')
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'your_admin_password')
-SUBSCRIPTION_AMOUNT = 40000  # 400 rupees in paise
+ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
+
+if not (ADMIN_EMAIL and ADMIN_PASSWORD) and is_production:
+    raise ValueError("Admin email credentials must be set in production")
+
+SUBSCRIPTION_AMOUNT = int(os.environ.get('SUBSCRIPTION_AMOUNT', '40000'))  # 400 rupees in paise
 
 # Flask-Mail Configuration
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
@@ -72,48 +107,128 @@ mail = Mail(app)
 # Set path for database file
 DB_PATH = os.path.join(DB_FOLDER, "emails.db")
 
+# Initialize CSRF protection
+csrf = CSRFProtect(app)
+
+# Initialize rate limiter
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://"
+)
+
+def get_db_connection():
+    """Get database connection based on environment"""
+    if is_production:
+        # Use MySQL in production (Hostinger)
+        db_user = os.environ.get('DB_USER')
+        db_password = os.environ.get('DB_PASSWORD')
+        db_host = os.environ.get('DB_HOST', 'localhost')
+        db_name = os.environ.get('DB_NAME')
+        
+        if not all([db_user, db_password, db_name]):
+            raise ValueError("Database credentials must be set in production")
+        
+        conn = pymysql.connect(
+            host=db_host,
+            user=db_user,
+            password=db_password,
+            database=db_name,
+            cursorclass=pymysql.cursors.DictCursor
+        )
+    else:
+        # Use SQLite in development
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+    
+    return conn
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    """Initialize the database schema"""
+    conn = get_db_connection()
     c = conn.cursor()
-    # Modified emails table to include user_id for filtering.
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS emails (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            sender_email TEXT NOT NULL,
-            sender_password TEXT NOT NULL,
-            recipient_email TEXT NOT NULL,
-            recipient_name TEXT NOT NULL,
-            subject TEXT NOT NULL,
-            body TEXT NOT NULL,
-            sent_date TEXT NOT NULL,
-            followup_date TEXT,
-            followup_sent INTEGER DEFAULT 0,
-            followup_body TEXT
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS credentials (
-            email TEXT PRIMARY KEY,
-            password TEXT NOT NULL
-        )
-    ''')
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            full_name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            secret_key TEXT NOT NULL,
-            registration_date TEXT NOT NULL,
-            payment_id TEXT,
-            payment_status TEXT,
-            subscription_end_date TEXT,
-            active INTEGER DEFAULT 1
-        )
-    ''')
+    
+    if is_production:
+        # MySQL specific schema
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS emails (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT,
+                sender_email VARCHAR(255) NOT NULL,
+                sender_password VARCHAR(255) NOT NULL,
+                recipient_email VARCHAR(255) NOT NULL,
+                recipient_name VARCHAR(255) NOT NULL,
+                subject VARCHAR(255) NOT NULL,
+                body TEXT NOT NULL,
+                sent_date DATETIME NOT NULL,
+                followup_date DATETIME,
+                followup_sent TINYINT(1) DEFAULT 0,
+                followup_body TEXT
+            )
+        ''')
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS credentials (
+                email VARCHAR(255) PRIMARY KEY,
+                password VARCHAR(255) NOT NULL
+            )
+        ''')
+        
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                full_name VARCHAR(255) NOT NULL,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                secret_key VARCHAR(255) NOT NULL,
+                registration_date DATETIME NOT NULL,
+                payment_id VARCHAR(255),
+                payment_status VARCHAR(50),
+                subscription_end_date DATETIME,
+                active TINYINT(1) DEFAULT 1
+            )
+        ''')
+    else:
+        # SQLite schema (for development)
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS emails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                sender_email TEXT NOT NULL,
+                sender_password TEXT NOT NULL,
+                recipient_email TEXT NOT NULL,
+                recipient_name TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                body TEXT NOT NULL,
+                sent_date TEXT NOT NULL,
+                followup_date TEXT,
+                followup_sent INTEGER DEFAULT 0,
+                followup_body TEXT
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS credentials (
+                email TEXT PRIMARY KEY,
+                password TEXT NOT NULL
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                full_name TEXT NOT NULL,
+                email TEXT UNIQUE NOT NULL,
+                secret_key TEXT NOT NULL,
+                registration_date TEXT NOT NULL,
+                payment_id TEXT,
+                payment_status TEXT,
+                subscription_end_date TEXT,
+                active INTEGER DEFAULT 1
+            )
+        ''')
+    
     conn.commit()
     conn.close()
-    print(f"Database initialized at {DB_PATH}")
+    app.logger.info(f"Database initialized")
 
 init_db()
 
@@ -124,11 +239,6 @@ def allowed_file(filename):
 def generate_secret_key(length=16):
     chars = string.ascii_letters + string.digits
     return ''.join(random.choice(chars) for _ in range(length))
-
-def get_db_connection():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 def send_admin_email(to_email, subject, body):
     try:
@@ -162,6 +272,7 @@ def index():
     return redirect(url_for('login'))
 
 @app.route('/login', methods=['GET', 'POST'])
+@limiter.limit("10 per minute")
 def login():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
@@ -192,6 +303,7 @@ def login():
     return render_template('login.html')
 
 @app.route('/register', methods=['GET', 'POST'])
+@limiter.limit("5 per minute")
 def register():
     # Do not insert into DB until payment is complete.
     if 'user_id' in session:
@@ -264,14 +376,18 @@ def payment_callback():
         if payment_verified:
             secret_key = generate_secret_key()
             subscription_end_date = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
-            conn = sqlite3.connect(DB_PATH)
+            
+            # Use hashed password for security
+            hashed_secret = encrypt_password(secret_key)
+            
+            conn = get_db_connection()
             c = conn.cursor()
             full_name = session['temp_user_data']['full_name']
             email = session['temp_user_data']['email']
             c.execute('''
                 INSERT INTO users (full_name, email, secret_key, registration_date, payment_status, subscription_end_date, active)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (full_name, email, secret_key, datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), 'completed', subscription_end_date, 1))
+            ''', (full_name, email, hashed_secret, datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), 'completed', subscription_end_date, 1))
             conn.commit()
             conn.close()
             subject = "Your Email Automation Tool Credentials"
@@ -358,7 +474,7 @@ def renew_callback():
             payment_verified = False
         if payment_verified:
             subscription_end_date = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_db_connection()
             conn.execute('UPDATE users SET subscription_end_date = ?, payment_id = ?, payment_status = ? WHERE id = ?',
                          (subscription_end_date, payment_id, 'renewed', session['user_id']))
             conn.commit()
@@ -473,7 +589,7 @@ def dashboard():
         sender_index = 0
         emails_sent = 0
         errors = 0
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
         now = datetime.now()
         current_date = now.strftime("%Y-%m-%d %H:%M:%S")
@@ -559,7 +675,7 @@ def followup_scheduler():
         loop_count += 1
         print(f"Scheduler check #{loop_count} at {datetime.now()}")
         try:
-            conn = sqlite3.connect(DB_PATH)
+            conn = get_db_connection()
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
             now = datetime.now()
@@ -655,7 +771,7 @@ def view_emails():
 @app.route('/send-followup/<int:email_id>', methods=['GET'])
 def send_followup(email_id):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         c.execute('SELECT * FROM emails WHERE id = ?', (email_id,))
@@ -707,7 +823,7 @@ def send_followup(email_id):
 @app.route('/check-followups')
 def check_followups():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         now = datetime.now()
@@ -775,7 +891,7 @@ def server_status():
         'database_path': DB_PATH
     }
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM emails")
         total_emails = c.fetchone()[0]
@@ -805,7 +921,124 @@ def server_status():
         status['database_connection'] = f'error: {str(e)}'
     return render_template('server_status.html', status=status)
 
+def configure_logging():
+    """Configure application logging"""
+    log_level = logging.INFO if is_production else logging.DEBUG
+    
+    # Configure file handler
+    if not os.path.exists(LOG_FOLDER):
+        os.mkdir(LOG_FOLDER)
+    
+    log_file = os.path.join(LOG_FOLDER, 'emailapp.log')
+    file_handler = RotatingFileHandler(log_file, maxBytes=1024000, backupCount=10)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    ))
+    file_handler.setLevel(log_level)
+    
+    # Configure console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(log_level)
+    console_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s'
+    ))
+    
+    # Add handlers to app logger
+    app.logger.addHandler(file_handler)
+    app.logger.addHandler(console_handler)
+    app.logger.setLevel(log_level)
+    
+    # Set up werkzeug logger too
+    werkzeug_logger = logging.getLogger('werkzeug')
+    werkzeug_logger.setLevel(log_level)
+    werkzeug_logger.addHandler(file_handler)
+    
+    app.logger.info('Email Automation Tool startup in ' + 
+                   ('PRODUCTION' if is_production else 'DEVELOPMENT') + ' mode')
+
+# Update password storage and checking methods
+def encrypt_password(password):
+    """Encrypt password for storage"""
+    return generate_password_hash(password)
+
+def verify_password(stored_password, provided_password):
+    """Verify password against stored hash"""
+    return check_password_hash(stored_password, provided_password)
+
+def send_email(sender_email, sender_password, recipient_email, recipient_name, subject, body, attachments=None):
+    """Centralized email sending function with improved error handling and retries"""
+    app.logger.info(f"Sending email to {recipient_email} from {sender_email}")
+    
+    try:
+        # Create SMTP connection with timeout
+        server = smtplib.SMTP('smtp.gmail.com', 587, timeout=30)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        
+        # Create email message
+        msg = MIMEText(f"Hello {recipient_name},\n\n{body}")
+        msg['Subject'] = subject
+        msg['From'] = sender_email
+        msg['To'] = recipient_email
+        
+        # Add attachments if provided
+        if attachments:
+            for attachment_path in attachments:
+                try:
+                    with open(attachment_path, 'rb') as file:
+                        part = MIMEBase('application', 'octet-stream')
+                        part.set_payload(file.read())
+                        encoders.encode_base64(part)
+                        part.add_header('Content-Disposition', 
+                                        f'attachment; filename="{os.path.basename(attachment_path)}"')
+                        msg.attach(part)
+                except Exception as att_err:
+                    app.logger.error(f"Error attaching file {attachment_path}: {str(att_err)}")
+        
+        # Send email
+        server.send_message(msg)
+        server.quit()
+        app.logger.info(f"Email sent successfully to {recipient_email}")
+        return True, None
+    
+    except smtplib.SMTPAuthenticationError:
+        app.logger.error(f"SMTP Authentication failed for {sender_email}")
+        return False, "Email authentication failed. Check sender email and password."
+    
+    except smtplib.SMTPException as smtp_err:
+        app.logger.error(f"SMTP error sending to {recipient_email}: {str(smtp_err)}")
+        return False, f"SMTP error: {str(smtp_err)}"
+    
+    except Exception as e:
+        app.logger.error(f"Error sending email to {recipient_email}: {str(e)}")
+        return False, f"Error: {str(e)}"
+
+# Add a custom error handler
+@app.errorhandler(404)
+def page_not_found(e):
+    app.logger.info(f"404 error: {request.path}")
+    return render_template('404.html'), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    app.logger.error(f"500 error: {str(e)}")
+    return render_template('500.html'), 500
+
+# Add basic error templates
+@app.route('/test-error/<error_type>')
+def test_error(error_type):
+    """Test route for error pages"""
+    if error_type == '404':
+        abort(404)
+    elif error_type == '500':
+        abort(500)
+    else:
+        return "Valid error types: 404, 500"
+
 if __name__ == '__main__':
+    if os.environ.get('FLASK_ENV') == 'production':
+        configure_logging()
     start_scheduler()
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    debug_mode = os.environ.get('FLASK_ENV') != 'production'
+    app.run(host='0.0.0.0', port=port, debug=debug_mode)
