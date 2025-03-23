@@ -1,5 +1,6 @@
-from flask import Flask, render_template, request, redirect, flash, jsonify
+from flask import Flask, render_template, request, redirect, flash, jsonify, session, url_for
 import os
+from dotenv import load_dotenv
 import pandas as pd
 from flask_mail import Mail, Message
 from werkzeug.utils import secure_filename
@@ -8,36 +9,55 @@ import string
 import math
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import sqlite3
 import pytz
 from threading import Event
+import uuid
+import razorpay
+import json
+import hmac
+import hashlib
+import functools
+import smtplib
+from email.mime.text import MIMEText
 
-# Global variable to track if scheduler is already running
+# Load environment variables from .env file
+load_dotenv()
+
+# Global variables for scheduler status and timing
 scheduler_running = False
+scheduler_start_time = None
+scheduler_last_check = None
 
 # Check if running on Render
 if 'RENDER' in os.environ:
-    # Use Render disk path if disk is mounted
     base_path = "/opt/render/project/src/data" if os.path.exists("/opt/render/project/src/data") else "/opt/render/project/src"
 else:
-    # Use local paths for development
     base_path = "."
 
 # Configure paths based on environment
 UPLOAD_FOLDER = os.path.join(base_path, "uploads")
 DB_FOLDER = os.path.join(base_path, "database")
-
-# Create directories if they don't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(DB_FOLDER, exist_ok=True)
 
 # Initialize Flask app
 app = Flask(__name__)
-app.secret_key = 'your_secret_key'  # Change this
-
-# Configure file upload folder
+app.secret_key = os.environ.get('SECRET_KEY', 'your_secret_key_change_this')
+app.config['SESSION_TYPE'] = 'filesystem'
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# Configure Razorpay
+RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', 'rzp_test_your_test_key')
+RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', 'your_test_secret')
+razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+
+# Admin email (used to send login credentials)
+ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', 'admin@example.com')
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', 'your_admin_password')
+SUBSCRIPTION_AMOUNT = 40000  # 400 rupees in paise
 
 # Flask-Mail Configuration
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
@@ -47,21 +67,19 @@ app.config['MAIL_USE_SSL'] = False
 app.config['MAIL_USERNAME'] = 'default_email@example.com'
 app.config['MAIL_PASSWORD'] = 'default_password'
 app.config['MAIL_DEFAULT_SENDER'] = 'default_email@example.com'
-
 mail = Mail(app)
 
 # Set path for database file
 DB_PATH = os.path.join(DB_FOLDER, "emails.db")
 
-# Create SQLite database for tracking emails
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
-    # Create emails table
+    # Modified emails table to include user_id for filtering.
     c.execute('''
         CREATE TABLE IF NOT EXISTS emails (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
             sender_email TEXT NOT NULL,
             sender_password TEXT NOT NULL,
             recipient_email TEXT NOT NULL,
@@ -74,33 +92,306 @@ def init_db():
             followup_body TEXT
         )
     ''')
-    
-    # Create a table to store email credentials
     c.execute('''
         CREATE TABLE IF NOT EXISTS credentials (
             email TEXT PRIMARY KEY,
             password TEXT NOT NULL
         )
     ''')
-    
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_name TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            secret_key TEXT NOT NULL,
+            registration_date TEXT NOT NULL,
+            payment_id TEXT,
+            payment_status TEXT,
+            subscription_end_date TEXT,
+            active INTEGER DEFAULT 1
+        )
+    ''')
     conn.commit()
     conn.close()
     print(f"Database initialized at {DB_PATH}")
 
-# Initialize database
 init_db()
 
 ALLOWED_EXTENSIONS = {'xlsx', 'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif'}
-
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
+def generate_secret_key(length=16):
+    chars = string.ascii_letters + string.digits
+    return ''.join(random.choice(chars) for _ in range(length))
+
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def send_admin_email(to_email, subject, body):
+    try:
+        msg = MIMEText(body)
+        msg['Subject'] = subject
+        msg['From'] = ADMIN_EMAIL
+        msg['To'] = to_email
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(ADMIN_EMAIL, ADMIN_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"Error sending admin email: {str(e)}")
+        return False
+
+def login_required(f):
+    @functools.wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            flash('Please log in to access this page', 'error')
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# ---------------------- User Authentication & Payment ---------------------- #
+
 @app.route('/')
 def index():
-    return redirect('/dashboard')
+    return redirect(url_for('login'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if 'user_id' in session:
+        return redirect(url_for('dashboard'))
+    if request.method == 'POST':
+        email = request.form.get('email')
+        secret_key = request.form.get('secret_key')
+        if not email or not secret_key:
+            flash('Please provide both email and secret key', 'error')
+            return render_template('login.html')
+        try:
+            conn = get_db_connection()
+            user = conn.execute(
+                'SELECT * FROM users WHERE email = ? AND secret_key = ? AND active = 1',
+                (email, secret_key)
+            ).fetchone()
+            conn.close()
+            if user:
+                if user['subscription_end_date'] and datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S') < datetime.utcnow():
+                    flash('Your subscription has expired. Please renew your subscription to send emails.', 'error')
+                session['user_id'] = user['id']
+                session['user_email'] = user['email']
+                session['user_name'] = user['full_name']
+                return redirect(url_for('dashboard'))
+            else:
+                flash('Invalid email or secret key', 'error')
+        except Exception as e:
+            flash(f'Login error: {str(e)}', 'error')
+    return render_template('login.html')
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    # Do not insert into DB until payment is complete.
+    if 'user_id' in session:
+        return redirect(url_for('dashboard'))
+    if request.method == 'POST':
+        full_name = request.form.get('full_name')
+        email = request.form.get('email')
+        if not full_name or not email:
+            flash('Please provide both full name and email', 'error')
+            return render_template('register.html')
+        # Save registration details temporarily in session
+        session['temp_user_data'] = {'full_name': full_name, 'email': email}
+        return redirect(url_for('payment'))
+    return render_template('register.html')
+
+@app.route('/payment')
+def payment():
+    if 'user_id' in session:
+        return redirect(url_for('dashboard'))
+    if 'temp_user_data' not in session:
+        flash('Please register before proceeding to payment', 'error')
+        return redirect(url_for('register'))
+    try:
+        order_amount = SUBSCRIPTION_AMOUNT
+        order_currency = 'INR'
+        # Use a shorter receipt string to meet Razorpay limits.
+        order_receipt = f"rcpt_{int(time.time())}"
+        razorpay_order = razorpay_client.order.create({
+            'amount': order_amount,
+            'currency': order_currency,
+            'receipt': order_receipt,
+        })
+        payment_data = {
+            'key': RAZORPAY_KEY_ID,
+            'amount': order_amount,
+            'currency': order_currency,
+            'name': 'Email Automation Tool',
+            'description': 'Monthly Subscription',
+            'order_id': razorpay_order['id'],
+            'prefill': {
+                'name': session['temp_user_data']['full_name'],
+                'email': session['temp_user_data']['email']
+            },
+            'theme': {'color': '#3498db'}
+        }
+        return render_template('payment.html', payment=payment_data)
+    except Exception as e:
+        flash(f'Payment initialization error: {str(e)}', 'error')
+        return redirect(url_for('register'))
+
+@app.route('/payment/callback', methods=['POST'])
+def payment_callback():
+    if 'temp_user_data' not in session:
+        flash('Invalid payment session', 'error')
+        return redirect(url_for('register'))
+    try:
+        payment_id = request.form.get('razorpay_payment_id', '')
+        order_id = request.form.get('razorpay_order_id', '')
+        signature = request.form.get('razorpay_signature', '')
+        params_dict = {
+            'razorpay_payment_id': payment_id,
+            'razorpay_order_id': order_id,
+            'razorpay_signature': signature
+        }
+        try:
+            razorpay_client.utility.verify_payment_signature(params_dict)
+            payment_verified = True
+        except Exception:
+            payment_verified = False
+        if payment_verified:
+            secret_key = generate_secret_key()
+            subscription_end_date = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            full_name = session['temp_user_data']['full_name']
+            email = session['temp_user_data']['email']
+            c.execute('''
+                INSERT INTO users (full_name, email, secret_key, registration_date, payment_status, subscription_end_date, active)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (full_name, email, secret_key, datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), 'completed', subscription_end_date, 1))
+            conn.commit()
+            conn.close()
+            subject = "Your Email Automation Tool Credentials"
+            body = f"""
+Hello {full_name},
+
+Thank you for subscribing to Email Automation Tool!
+
+Your login credentials:
+Email: {email}
+Secret Key: {secret_key}
+
+Please keep this information secure.
+
+Best regards,
+Email Automation Tool Team
+"""
+            send_admin_email(email, subject, body)
+            session.pop('temp_user_data', None)
+            flash('Payment successful! Your account has been created. Please check your email for credentials.', 'success')
+            return redirect(url_for('login'))
+        else:
+            flash('Payment verification failed. Please try again.', 'error')
+            return redirect(url_for('payment'))
+    except Exception as e:
+        flash(f'Payment processing error: {str(e)}', 'error')
+        return redirect(url_for('register'))
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    flash("You have been logged out successfully", "success")
+    return redirect(url_for('login'))
+
+# ---------------------- Subscription Renewal ---------------------- #
+
+@app.route('/renew')
+@login_required
+def renew():
+    conn = get_db_connection()
+    user = conn.execute('SELECT subscription_end_date FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+    conn.close()
+    if user and user['subscription_end_date'] and datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S') >= datetime.utcnow():
+        flash('Your subscription is still active.', 'info')
+        return redirect(url_for('dashboard'))
+    try:
+        order_amount = SUBSCRIPTION_AMOUNT
+        order_currency = 'INR'
+        order_receipt = f"renew_{session['user_id']}_{int(time.time())}"
+        razorpay_order = razorpay_client.order.create({
+            'amount': order_amount,
+            'currency': order_currency,
+            'receipt': order_receipt,
+        })
+        payment_data = {
+            'key': RAZORPAY_KEY_ID,
+            'amount': order_amount,
+            'currency': order_currency,
+            'name': 'Email Automation Tool Renewal',
+            'description': 'Subscription Renewal',
+            'order_id': razorpay_order['id']
+        }
+        return render_template('renew.html', payment=payment_data)
+    except Exception as e:
+        flash(f'Renewal initialization error: {str(e)}', 'error')
+        return redirect(url_for('dashboard'))
+
+@app.route('/renew/callback', methods=['POST'])
+@login_required
+def renew_callback():
+    try:
+        payment_id = request.form.get('razorpay_payment_id', '')
+        order_id = request.form.get('razorpay_order_id', '')
+        signature = request.form.get('razorpay_signature', '')
+        params_dict = {
+            'razorpay_payment_id': payment_id,
+            'razorpay_order_id': order_id,
+            'razorpay_signature': signature
+        }
+        try:
+            razorpay_client.utility.verify_payment_signature(params_dict)
+            payment_verified = True
+        except Exception:
+            payment_verified = False
+        if payment_verified:
+            subscription_end_date = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute('UPDATE users SET subscription_end_date = ?, payment_id = ?, payment_status = ? WHERE id = ?',
+                         (subscription_end_date, payment_id, 'renewed', session['user_id']))
+            conn.commit()
+            conn.close()
+            flash('Subscription renewed successfully!', 'success')
+            return redirect(url_for('dashboard'))
+        else:
+            flash('Renewal payment verification failed. Please try again.', 'error')
+            return redirect(url_for('renew'))
+    except Exception as e:
+        flash(f'Renewal processing error: {str(e)}', 'error')
+        return redirect(url_for('dashboard'))
+
+# ---------------------- Dashboard & Email Automation ---------------------- #
 
 @app.route('/dashboard', methods=["GET", "POST"])
+@login_required
 def dashboard():
+    conn = get_db_connection()
+    user = conn.execute('SELECT subscription_end_date FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+    conn.close()
+    subscription_active = False
+    user_subscription_end = "N/A"
+    if user and user['subscription_end_date']:
+        sub_date = datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S')
+        user_subscription_end = sub_date.strftime('%B %d, %Y')
+        if sub_date >= datetime.utcnow():
+            subscription_active = True
+    # If subscription is expired, show renew option (and no email-sending form)
+    if not subscription_active:
+        flash("Your subscription has expired. Please renew to send emails.", "error")
+        return render_template('dashboard.html', subscription_active=False, user_subscription_end=user_subscription_end)
+    # If subscription active and POST, process email sending
     if request.method == "POST":
         subject = request.form.get("subject")
         body = request.form.get("body")
@@ -108,13 +399,9 @@ def dashboard():
         followup_datetime = request.form.get("followup_datetime")
         use_days = request.form.get("use-days") == "on"
         followup_body = request.form.get("followup_body")
-        
-        # Check if followup is enabled
         has_followup = False
         if followup_body:
             has_followup = True
-            
-            # Validate days or datetime based on which option is selected
             if use_days and followup_days:
                 try:
                     followup_days = int(followup_days)
@@ -123,8 +410,6 @@ def dashboard():
                     return redirect("/dashboard")
             elif not use_days and followup_datetime:
                 try:
-                    # Parse the datetime-local value
-                    from datetime import datetime
                     datetime.strptime(followup_datetime, '%Y-%m-%dT%H:%M')
                 except ValueError:
                     flash("Invalid follow-up date/time format", "error")
@@ -132,153 +417,109 @@ def dashboard():
             else:
                 flash("Please provide valid follow-up timing", "error")
                 return redirect("/dashboard")
-
-        # Get the Excel file with recipient data
+        # Recipients file
         recipients_file = request.files["xlsx_file"]
         if not (recipients_file and allowed_file(recipients_file.filename)):
             flash("Please upload a valid XLSX file with recipients", "error")
             return redirect("/dashboard")
-
-        filename = secure_filename(recipients_file.filename)
-        recipients_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-        recipients_file.save(recipients_path)
-
+        rec_filename = secure_filename(recipients_file.filename)
+        rec_path = os.path.join(app.config["UPLOAD_FOLDER"], rec_filename)
+        recipients_file.save(rec_path)
         try:
-            recipients_df = pd.read_excel(recipients_path)
+            recipients_df = pd.read_excel(rec_path)
             if "name" not in recipients_df.columns or "email" not in recipients_df.columns:
                 flash("Recipients XLSX must contain 'name' and 'email' columns!", "error")
                 return redirect("/dashboard")
         except Exception as e:
             flash(f"Error reading recipients XLSX: {e}", "error")
             return redirect("/dashboard")
-
-        # Get the Excel file with sender login credentials
+        # Sender login file
         login_file = request.files["login_file"]
         if not (login_file and allowed_file(login_file.filename)):
             flash("Please upload a valid XLSX file with login credentials", "error")
             return redirect("/dashboard")
-
         login_filename = secure_filename(login_file.filename)
         login_path = os.path.join(app.config["UPLOAD_FOLDER"], login_filename)
         login_file.save(login_path)
-
         try:
             login_df = pd.read_excel(login_path)
             if "email" not in login_df.columns or "password" not in login_df.columns:
                 flash("Login XLSX must contain 'email' and 'password' columns!", "error")
                 return redirect("/dashboard")
-            
-            # Validate that we have at least one valid login
             if len(login_df) == 0:
                 flash("Login file must contain at least one email account!", "error")
                 return redirect("/dashboard")
         except Exception as e:
             flash(f"Error reading login XLSX: {e}", "error")
             return redirect("/dashboard")
-
-        # Process attachment files
+        # Process attachments (optional)
         attachments = []
         if "attachments" in request.files:
             files = request.files.getlist("attachments")
-            if not files:
-                flash("No attachment files were found.", "warning")
             for file in files:
                 if file.filename == '':
-                    continue  # Skip files with empty filename
+                    continue
                 if file and allowed_file(file.filename):
-                    filename = secure_filename(file.filename)
-                    file_path = os.path.join(app.config["UPLOAD_FOLDER"], filename)
+                    fname = secure_filename(file.filename)
+                    file_path = os.path.join(app.config["UPLOAD_FOLDER"], fname)
                     file.save(file_path)
                     attachments.append(file_path)
-                    flash(f"Uploaded attachment: {filename}", "success")
+                    flash(f"Uploaded attachment: {fname}", "success")
                 else:
                     flash(f"Skipped file: {file.filename} (invalid type)", "warning")
-        
-        # Calculate how to distribute emails
         total_recipients = len(recipients_df)
         total_senders = len(login_df)
-        
         recipients_per_sender = math.ceil(total_recipients / total_senders)
-        
         sender_index = 0
         emails_sent = 0
         errors = 0
-        
-        # Connect to database for storing email records
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        
-        # Current date and time
         now = datetime.now()
         current_date = now.strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Calculate followup date if needed
         followup_date = None
         if has_followup:
-            from datetime import timedelta
-            
             if use_days and followup_days:
-                # Calculate based on days offset
                 followup_date = (now + timedelta(days=followup_days)).strftime("%Y-%m-%d %H:%M:%S")
             elif not use_days and followup_datetime:
-                # Use specific datetime
                 try:
-                    # Convert the datetime-local value to a datetime object
                     specific_datetime = datetime.strptime(followup_datetime, '%Y-%m-%dT%H:%M')
                     followup_date = specific_datetime.strftime("%Y-%m-%d %H:%M:%S")
                 except ValueError:
                     flash("Invalid follow-up date/time format", "error")
                     return redirect("/dashboard")
-        
-        # Store all credentials in credentials table for future use
+        # Store sender credentials in DB
         for _, row in login_df.iterrows():
-            email = row["email"]
-            password = row["password"]
-            
-            # Store or update credential
-            c.execute('INSERT OR REPLACE INTO credentials (email, password) VALUES (?, ?)', 
-                     (email, password))
-        
+            em = row["email"]
+            pw = row["password"]
+            c.execute('INSERT OR REPLACE INTO credentials (email, password) VALUES (?, ?)', (em, pw))
         conn.commit()
-        
-        # Iterate through recipients and send emails using the sender accounts
-        for i, recipient_row in recipients_df.iterrows():
-            # Determine which sender to use
+        # Iterate through recipients, sending emails and storing records with the current user's id.
+        for i, rec_row in recipients_df.iterrows():
             sender_row = login_df.iloc[sender_index]
             sender_email = sender_row["email"]
             sender_password = sender_row["password"]
-            
-            # Configure mail for this sender
             app.config['MAIL_USERNAME'] = sender_email
             app.config['MAIL_PASSWORD'] = sender_password
             app.config['MAIL_DEFAULT_SENDER'] = sender_email
-            
-            # Reinitialize mail with new settings
             mail = Mail(app)
-            
             try:
-                # Create message
-                msg = Message(subject, recipients=[recipient_row["email"]])
-                msg.body = f"Hello {recipient_row['name']},\n\n{body}"
-
-                # Add attachments
+                msg = Message(subject, recipients=[rec_row["email"]])
+                msg.body = f"Hello {rec_row['name']},\n\n{body}"
                 for attach in attachments:
                     with open(attach, "rb") as f:
                         msg.attach(os.path.basename(attach), "application/octet-stream", f.read())
-
-                # Send email
                 mail.send(msg)
                 emails_sent += 1
-                
-                # Store in database
                 c.execute('''
-                    INSERT INTO emails (sender_email, sender_password, recipient_email, recipient_name, subject, body, sent_date, followup_date, followup_body) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO emails (user_id, sender_email, sender_password, recipient_email, recipient_name, subject, body, sent_date, followup_date, followup_body)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
+                    session['user_id'],
                     sender_email,
                     sender_password,
-                    recipient_row["email"],
-                    recipient_row["name"],
+                    rec_row["email"],
+                    rec_row["name"],
                     subject,
                     body,
                     current_date,
@@ -286,57 +527,44 @@ def dashboard():
                     followup_body if has_followup else None
                 ))
                 conn.commit()
-                
-                # Move to next sender after sending the calculated number of emails
                 if (i + 1) % recipients_per_sender == 0 and sender_index < total_senders - 1:
                     sender_index += 1
                     flash(f"Switched to sender: {login_df.iloc[sender_index]['email']}", "info")
-            
             except Exception as e:
                 errors += 1
-                flash(f"Error sending email to {recipient_row['email']}: {e}", "error")
-                
-                # If we encounter an error with this sender, try the next one
+                flash(f"Error sending email to {rec_row['email']}: {e}", "error")
                 if sender_index < total_senders - 1:
                     sender_index += 1
                     flash(f"Error with sender, switched to: {login_df.iloc[sender_index]['email']}", "warning")
-
         conn.close()
-        
-        # We no longer need to start the scheduler here
-        # It's already started from wsgi.py
-        
         flash(f"Email sending complete: {emails_sent} sent, {errors} failed", "success")
         if has_followup:
             if use_days:
                 flash(f"Follow-up emails scheduled for {followup_days} days later", "info")
             else:
-                from datetime import datetime
                 followup_dt = datetime.strptime(followup_date, "%Y-%m-%d %H:%M:%S")
                 formatted_date = followup_dt.strftime("%B %d, %Y at %I:%M %p")
                 flash(f"Follow-up emails scheduled for {formatted_date}", "info")
+        return redirect(url_for('dashboard'))
+    else:
+        # GET: show dashboard with email-sending form only (email tracking is on /emails)
+        return render_template('dashboard.html', subscription_active=True, user_subscription_end=user_subscription_end)
 
-    return render_template("dashboard.html")
+# ---------------------- Follow-Up Scheduler & Manual Trigger ---------------------- #
 
 def followup_scheduler():
-    """Background thread to check and send follow-up emails"""
     print("Follow-up scheduler started")
     loop_count = 0
     while True:
         loop_count += 1
         print(f"Scheduler check #{loop_count} at {datetime.now()}")
         try:
-            # Connect to database
             conn = sqlite3.connect(DB_PATH)
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
-            
-            # Current time
             now = datetime.now()
             current_time = now.strftime("%Y-%m-%d %H:%M:%S")
             print(f"Current time for comparison: {current_time}")
-            
-            # Check if database exists and has the expected structure
             try:
                 c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='emails'")
                 if not c.fetchone():
@@ -347,8 +575,7 @@ def followup_scheduler():
                 print(f"Database structure check error: {str(db_err)}")
                 time.sleep(60)
                 continue
-            
-            # Find emails that need follow-up
+            # Optionally, you can filter follow-ups for the current user here if desired.
             c.execute('''
                 SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body, followup_date
                 FROM emails 
@@ -356,28 +583,8 @@ def followup_scheduler():
                 AND followup_sent = 0
                 AND followup_body IS NOT NULL
             ''', (current_time,))
-            
             emails_to_followup = c.fetchall()
             print(f"Found {len(emails_to_followup)} emails due for follow-up")
-            
-            # Debug: Show all pending follow-ups regardless of date
-            c.execute('''
-                SELECT id, followup_date, followup_sent
-                FROM emails 
-                WHERE followup_sent = 0
-                AND followup_body IS NOT NULL
-            ''')
-            pending = c.fetchall()
-            print(f"All pending follow-ups in system: {len(pending)}")
-            for p in pending:
-                print(f"  - ID: {p['id']}, Date: {p['followup_date']}, Sent: {p['followup_sent']}")
-                
-                # Compare with current time to see if they should be sent
-                if p['followup_date'] <= current_time:
-                    print(f"  - Email ID {p['id']} SHOULD be sent now")
-                else:
-                    print(f"  - Email ID {p['id']} not yet due (scheduled for {p['followup_date']})")
-            
             for email in emails_to_followup:
                 email_id = email['id']
                 sender_email = email['sender_email']
@@ -386,69 +593,43 @@ def followup_scheduler():
                 recipient_name = email['recipient_name']
                 subject = email['subject']
                 followup_body = email['followup_body']
-                followup_date = email['followup_date']
-                
                 print(f"Sending follow-up to {recipient_email} from {sender_email}")
-                
                 try:
-                    # Create a new Flask app context for mail
                     with app.app_context():
-                        # Configure mail for this sender
                         mail_config = {
                             'MAIL_SERVER': 'smtp.gmail.com',
                             'MAIL_PORT': 587,
                             'MAIL_USE_TLS': True,
                             'MAIL_USE_SSL': False,
                             'MAIL_USERNAME': sender_email,
-                            'MAIL_PASSWORD': sender_password,  # Use stored password from database
+                            'MAIL_PASSWORD': sender_password,
                             'MAIL_DEFAULT_SENDER': sender_email
                         }
-                        
-                        # Create a new mail instance with this config
                         mail_app = Flask(f"mail_app_{email_id}")
                         for key, value in mail_config.items():
                             mail_app.config[key] = value
-                        
                         with mail_app.app_context():
                             mail_instance = Mail(mail_app)
-                            
-                            # Create follow-up message
                             followup_subject = f"Follow-up: {subject}"
                             msg = Message(followup_subject, recipients=[recipient_email])
                             msg.body = f"Hello {recipient_name},\n\n{followup_body}"
-                            
-                            # Send follow-up email
                             mail_instance.send(msg)
-                            
-                            # Update database
-                            c.execute('''
-                                UPDATE emails 
-                                SET followup_sent = 1 
-                                WHERE id = ?
-                            ''', (email_id,))
+                            c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
                             conn.commit()
                             print(f"Successfully sent follow-up to {recipient_email}")
                 except Exception as e:
                     print(f"Error sending follow-up to {recipient_email}: {str(e)}")
-            
             conn.close()
-            
-            # Sleep for 1 minute before checking again
             time.sleep(60)
-            
         except Exception as e:
             print(f"Error in follow-up scheduler: {str(e)}")
-            # Sleep for 30 seconds before retrying
             time.sleep(30)
 
-# Create a separate function to manage the single global instance of the scheduler
 def start_scheduler():
-    global scheduler_running
+    global scheduler_running, scheduler_start_time
     print("start_scheduler function called")
-    
-    # Only start if not already running
     if not scheduler_running:
-        # Start the followup scheduler in a background thread
+        scheduler_start_time = datetime.now()
         scheduler_thread = threading.Thread(target=followup_scheduler)
         scheduler_thread.daemon = True
         scheduler_thread.start()
@@ -458,114 +639,79 @@ def start_scheduler():
         print("Scheduler already running, not starting a new thread")
 
 @app.route('/emails')
+@login_required
 def view_emails():
-    """View all emails and their status"""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    
-    c.execute('''
-        SELECT * FROM emails ORDER BY sent_date DESC
-    ''')
-    
-    emails = [dict(row) for row in c.fetchall()]
+    conn = get_db_connection()
+    # Filter emails to show only those sent by the current user.
+    user_email = session.get('user_email')
+    emails = conn.execute(
+        'SELECT id, recipient_email as email, subject, sent_date, followup_sent, followup_date, body, followup_body '
+        'FROM emails WHERE user_id = ? ORDER BY sent_date DESC',
+        (session['user_id'],)
+    ).fetchall()
     conn.close()
-    
     return render_template('emails.html', emails=emails)
 
 @app.route('/send-followup/<int:email_id>', methods=['GET'])
 def send_followup(email_id):
-    """Manually trigger follow-up for a specific email"""
     try:
-        # Connect to database
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
-        
-        # Find the email
         c.execute('SELECT * FROM emails WHERE id = ?', (email_id,))
         email = c.fetchone()
-        
         if not email:
             flash(f"Email ID {email_id} not found", "error")
             return redirect('/emails')
-        
-        # Create a local function to send the follow-up
         def send_single_followup():
             if email['followup_sent'] == 1:
                 flash(f"Follow-up for email ID {email_id} was already sent", "warning")
                 return False
-                
             if not email['followup_body']:
                 flash(f"Email ID {email_id} has no follow-up message", "error")
                 return False
-                
             try:
-                # Get the sender password 
                 sender_password = email['sender_password']
-                
-                # Configure mail for this sender
                 mail_config = {
                     'MAIL_SERVER': 'smtp.gmail.com',
                     'MAIL_PORT': 587,
                     'MAIL_USE_TLS': True,
                     'MAIL_USE_SSL': False,
                     'MAIL_USERNAME': email['sender_email'],
-                    'MAIL_PASSWORD': sender_password,  # Use stored password
+                    'MAIL_PASSWORD': sender_password,
                     'MAIL_DEFAULT_SENDER': email['sender_email']
                 }
-                
-                # Create a new mail instance with this config
                 mail_app = Flask(f"mail_app_{email_id}")
                 for key, value in mail_config.items():
                     mail_app.config[key] = value
-                
                 with mail_app.app_context():
                     mail_instance = Mail(mail_app)
-                    
-                    # Create follow-up message
                     followup_subject = f"Follow-up: {email['subject']}"
                     msg = Message(followup_subject, recipients=[email['recipient_email']])
                     msg.body = f"Hello {email['recipient_name']},\n\n{email['followup_body']}"
-                    
-                    # Send follow-up email
                     mail_instance.send(msg)
-                    
-                    # Update database
                     c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
                     conn.commit()
-                    
                     flash(f"Follow-up email sent to {email['recipient_email']}", "success")
                     return True
             except Exception as e:
                 flash(f"Error sending follow-up: {str(e)}", "error")
                 return False
-        
-        # Send the follow-up
-        success = send_single_followup()
-        
+        send_single_followup()
         conn.close()
-        
         return redirect('/emails')
-    
     except Exception as e:
         flash(f"Error processing follow-up: {str(e)}", "error")
         return redirect('/emails')
 
 @app.route('/check-followups')
 def check_followups():
-    """Manually check for follow-ups that need to be sent"""
     try:
-        # Connect to database
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
-        
-        # Current time
         now = datetime.now()
         current_time = now.strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Find emails that need follow-up
         c.execute('''
             SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body 
             FROM emails 
@@ -573,11 +719,9 @@ def check_followups():
             AND followup_sent = 0
             AND followup_body IS NOT NULL
         ''', (current_time,))
-        
         emails_to_followup = c.fetchall()
         sent_count = 0
         errors = []
-        
         for email in emails_to_followup:
             email_id = email['id']
             sender_email = email['sender_email']
@@ -586,91 +730,59 @@ def check_followups():
             recipient_name = email['recipient_name']
             subject = email['subject']
             followup_body = email['followup_body']
-            
             try:
-                # Create a new Flask app context for mail
                 with app.app_context():
-                    # Configure mail for this sender
                     mail_config = {
                         'MAIL_SERVER': 'smtp.gmail.com',
                         'MAIL_PORT': 587,
                         'MAIL_USE_TLS': True,
                         'MAIL_USE_SSL': False,
                         'MAIL_USERNAME': sender_email,
-                        'MAIL_PASSWORD': sender_password,  # Use stored password from database
+                        'MAIL_PASSWORD': sender_password,
                         'MAIL_DEFAULT_SENDER': sender_email
                     }
-                    
-                    # Create a new mail instance with this config
                     mail_app = Flask(f"mail_app_{email_id}")
                     for key, value in mail_config.items():
                         mail_app.config[key] = value
-                    
                     with mail_app.app_context():
                         mail_instance = Mail(mail_app)
-                        
-                        # Create follow-up message
                         followup_subject = f"Follow-up: {subject}"
                         msg = Message(followup_subject, recipients=[recipient_email])
                         msg.body = f"Hello {recipient_name},\n\n{followup_body}"
-                        
-                        # Send follow-up email
                         mail_instance.send(msg)
-                        
-                        # Update database
-                        c.execute('''
-                            UPDATE emails 
-                            SET followup_sent = 1 
-                            WHERE id = ?
-                        ''', (email_id,))
+                        c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
                         conn.commit()
                         sent_count += 1
             except Exception as e:
                 errors.append(f"Error sending follow-up to {recipient_email}: {str(e)}")
-        
         conn.close()
-        
         if sent_count > 0:
             flash(f"Manually sent {sent_count} follow-up emails", "success")
-        
         if errors:
             for error in errors:
                 flash(error, "error")
-        
         if sent_count == 0 and not errors:
             flash("No follow-up emails needed to be sent at this time", "info")
-        
     except Exception as e:
         flash(f"Error checking follow-ups: {str(e)}", "error")
-    
     return redirect('/server-status')
 
 @app.route('/server-status')
 def server_status():
-    """View server status, including scheduler status"""
-    # Gather information
     status = {
         'scheduler_running': scheduler_running,
         'server_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'database_path': DB_PATH
     }
-    
-    # Check database connection
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
-        
-        # Check emails table
         c.execute("SELECT COUNT(*) FROM emails")
         total_emails = c.fetchone()[0]
         status['total_emails'] = total_emails
-        
-        # Check pending follow-ups
         c.execute("SELECT COUNT(*) FROM emails WHERE followup_date IS NOT NULL AND followup_sent = 0")
         pending_followups = c.fetchone()[0]
         status['pending_followups'] = pending_followups
-        
-        # Get list of pending follow-ups
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         c.execute('''
@@ -680,8 +792,6 @@ def server_status():
             ORDER BY followup_date
         ''')
         status['pending_followups_list'] = [dict(row) for row in c.fetchall()]
-        
-        # Check past due follow-ups
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         c.execute('''
             SELECT COUNT(*) FROM emails 
@@ -689,21 +799,13 @@ def server_status():
         ''', (current_time,))
         past_due = c.fetchone()[0]
         status['past_due_followups'] = past_due
-        
         conn.close()
         status['database_connection'] = 'success'
     except Exception as e:
         status['database_connection'] = f'error: {str(e)}'
-    
     return render_template('server_status.html', status=status)
 
 if __name__ == '__main__':
-    # Start the background scheduler
     start_scheduler()
-    
-    # Get port from environment variable (Render sets this)
     port = int(os.environ.get("PORT", 5000))
-    
-    # Run the app on 0.0.0.0 to make it accessible externally
     app.run(host='0.0.0.0', port=port, debug=False)
-

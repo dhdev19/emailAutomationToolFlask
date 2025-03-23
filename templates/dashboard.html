@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard | Mass Email Sender</title>
+    <title>Dashboard | Email Automation Tool</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 0; padding: 0; display: flex; }
         .sidebar { width: 250px; background: #343a40; padding: 20px; height: 100vh; color: white; }
@@ -11,6 +11,37 @@
         .sidebar a:hover { background: #0056b3; }
         .content { flex-grow: 1; padding: 20px; }
         h2 { text-align: center; }
+        .user-info { 
+            display: flex;
+            justify-content: space-between;
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            align-items: center;
+        }
+        .user-welcome {
+            font-size: 18px;
+            font-weight: 500;
+            color: #333;
+        }
+        .user-subscription {
+            font-size: 14px;
+            color: #666;
+        }
+        .logout-btn {
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            text-decoration: none;
+            font-size: 14px;
+        }
+        .logout-btn:hover {
+            background-color: #c82333;
+        }
         form { max-width: 600px; margin: auto; padding: 20px; border-radius: 10px; background: #f9f9f9; box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1); }
         label { font-weight: bold; display: block; margin-top: 10px; }
         input, textarea, button { width: 100%; margin: 5px 0; padding: 8px; border: 1px solid #ccc; border-radius: 5px; }
@@ -40,19 +71,67 @@
             border-radius: 5px;
             display: none;
         }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }
+        table th, table td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        table th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+        }
+        .badge {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 3px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .badge-success {
+            background-color: #28a745;
+            color: white;
+        }
+        .badge-warning {
+            background-color: #ffc107;
+            color: #212529;
+        }
+        .action-btn {
+            padding: 5px 10px;
+            border-radius: 3px;
+            background-color: #007bff;
+            color: white;
+            text-decoration: none;
+            font-size: 12px;
+        }
+        .action-btn:hover {
+            background-color: #0056b3;
+        }
     </style>
 </head>
 <body>
 
 <div class="sidebar">
     <h3>Dashboard</h3>
-    <a href="/">Home</a>
-    <a href="/dashboard">Mass Email Sender</a>
+    <a href="/dashboard">Dashboard</a>
     <a href="/emails">Email Tracking</a>
+    <a href="/server-status">Server Status</a>
 </div>
 
 <div class="content">
-    <h2>Mass Email Sender</h2>
+    <div class="user-info">
+        <div>
+            <div class="user-welcome">Welcome, {{ session['user_name'] }}</div>
+            <div class="user-subscription">Subscription active until {{ user_subscription_end }}</div>
+        </div>
+        <a href="/logout" class="logout-btn">Logout</a>
+    </div>
+    
+    <h2>Email Tracking</h2>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
         {% if messages %}
@@ -61,6 +140,43 @@
             {% endfor %}
         {% endif %}
     {% endwith %}
+
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Email</th>
+                <th>Subject</th>
+                <th>Sent Date</th>
+                <th>Follow-up Status</th>
+                <th>Follow-up Date</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for email in emails %}
+            <tr>
+                <td>{{ email['id'] }}</td>
+                <td>{{ email['email'] }}</td>
+                <td>{{ email['subject'] }}</td>
+                <td>{{ email['sent_date'] }}</td>
+                <td>
+                    {% if email['followup_sent'] == 1 %}
+                        <span class="badge badge-success">Sent</span>
+                    {% else %}
+                        <span class="badge badge-warning">Pending</span>
+                    {% endif %}
+                </td>
+                <td>{{ email['followup_date'] }}</td>
+                <td>
+                    {% if email['followup_sent'] == 0 %}
+                        <a href="/send-followup/{{ email['id'] }}" class="action-btn">Send Now</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
 
     <form action="/dashboard" method="POST" enctype="multipart/form-data">
         <h3 class="section-title">Email Content</h3>
@@ -113,6 +229,14 @@
 </div>
 
 <script>
+    // Prevent back button
+    if (window.history && window.history.pushState) {
+        window.addEventListener('popstate', function() {
+            window.history.pushState(null, null, window.location.pathname);
+        });
+        window.history.pushState(null, null, window.location.pathname);
+    }
+    
     // Toggle follow-up options visibility
     document.getElementById('enable-followup').addEventListener('change', function() {
         const followupOptions = document.getElementById('followup-options');
