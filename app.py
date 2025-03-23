@@ -33,6 +33,7 @@ from email.mime.base import MIMEBase
 from email import encoders
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # Load environment variables from .env file
 load_dotenv()
@@ -62,6 +63,9 @@ os.makedirs(LOG_FOLDER, exist_ok=True)
 # Initialize Flask app
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY')
+from flask_wtf.csrf import CSRFProtect
+csrf = CSRFProtect(app)
+
 if not app.secret_key:
     if is_production:
         raise ValueError("SECRET_KEY environment variable must be set in production")
@@ -285,9 +289,19 @@ def login():
         try:
             conn = get_db_connection()
             user = conn.execute(
-                'SELECT * FROM users WHERE email = ? AND secret_key = ? AND active = 1',
-                (email, secret_key)
+                'SELECT * FROM users WHERE email = ? AND active = 1',
+                (email,)
             ).fetchone()
+            conn.close()
+            if user and check_password_hash(user['secret_key'], secret_key):
+                # login successful
+                session['user_id'] = user['id']
+                session['user_email'] = user['email']
+                session['user_name'] = user['full_name']
+                return redirect(url_for('dashboard'))
+            else:
+                flash('Invalid email or secret key', 'error')
+
             conn.close()
             if user:
                 if user['subscription_end_date'] and datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S') < datetime.utcnow():
@@ -743,6 +757,8 @@ def followup_scheduler():
 
 def start_scheduler():
     global scheduler_running, scheduler_start_time
+    scheduler_running = False
+    scheduler_start_time = None
     print("start_scheduler function called")
     if not scheduler_running:
         scheduler_start_time = datetime.now()

@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!DOCTYPE html> 
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -179,6 +179,8 @@
     </table>
 
     <form action="/dashboard" method="POST" enctype="multipart/form-data">
+        <!-- CSRF token -->
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <h3 class="section-title">Email Content</h3>
         <label for="subject">Email Subject:</label>
         <input type="text" name="subject" required>

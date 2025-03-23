@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Renew Subscription - Email Automation Tool{% endblock %}
+{% block content %}
+<div class="container" style="max-width:500px; margin:50px auto; padding:30px; background:white; border-radius:10px; box-shadow:0 4px 15px rgba(0,0,0,0.1); text-align:center;">
+    <div class="logo" style="margin-bottom:30px;">
+        <h1 style="color:#3498db;">Email Automation Tool</h1>
+    </div>
+    <h2>Renew Subscription</h2>
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="flash-message {{ category }}" style="padding:10px; margin-bottom:15px; border-radius:5px; {% if category=='error' %}background:#ffebe8; color:#d73a49;{% elif category=='success' %}background:#e6ffed; color:#22863a;{% endif %}">
+                    {{ message }}
+                </div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    <div class="payment-details" style="margin-bottom:30px; background:#f8f9fa; padding:20px; border-radius:5px; text-align:left;">
+        <div class="detail-row" style="display:flex; justify-content:space-between; padding:10px 0; border-bottom:1px solid #eee;">
+            <span class="detail-label">Plan</span>
+            <span class="detail-value">Monthly Subscription Renewal</span>
+        </div>
+        <div class="detail-row total" style="display:flex; justify-content:space-between; padding:10px 0; font-size:18px; color:#2c3e50;">
+            <span class="detail-label">Total</span>
+            <span class="detail-value">₹{{ payment.amount/100 }}</span>
+        </div>
+    </div>
+    <button id="rzp-button" class="payment-btn" style="background:#3498db; color:white; padding:14px; border:none; border-radius:5px; width:100%; font-size:16px; cursor:pointer;">Renew Now</button>
+    <div class="back-link" style="text-align:center; margin-top:20px; font-size:14px; color:#555;">
+        <a href="{{ url_for('dashboard') }}" style="color:#3498db; text-decoration:none;">Return to Dashboard</a>
+    </div>
+</div>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script>
+    if (window.history && window.history.pushState) {
+        window.addEventListener('popstate', function() {
+            window.history.pushState(null, null, window.location.pathname);
+        });
+        window.history.pushState(null, null, window.location.pathname);
+    }
+    
+    var options = {
+        "key": "{{ payment.key }}",
+        "amount": "{{ payment.amount }}",
+        "currency": "{{ payment.currency }}",
+        "name": "{{ payment.name }}",
+        "description": "{{ payment.description }}",
+        "order_id": "{{ payment.order_id }}",
+        "handler": function (response) {
+            var form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '{{ url_for("renew_callback") }}';
+            
+            // Add CSRF token
+            var csrfInput = document.createElement('input');
+            csrfInput.type = 'hidden';
+            csrfInput.name = 'csrf_token';
+            csrfInput.value = '{{ csrf_token() }}';
+            form.appendChild(csrfInput);
+            
+            var orderIdInput = document.createElement('input');
+            orderIdInput.name = 'razorpay_order_id';
+            orderIdInput.value = response.razorpay_order_id;
+            form.appendChild(orderIdInput);
+            
+            var paymentIdInput = document.createElement('input');
+            paymentIdInput.name = 'razorpay_payment_id';
+            paymentIdInput.value = response.razorpay_payment_id;
+            form.appendChild(paymentIdInput);
+            
+            var signatureInput = document.createElement('input');
+            signatureInput.name = 'razorpay_signature';
+            signatureInput.value = response.razorpay_signature;
+            form.appendChild(signatureInput);
+            
+            document.body.appendChild(form);
+            form.submit();
+        }
+    };
+    
+    var rzp = new Razorpay(options);
+    document.getElementById('rzp-button').onclick = function(e) {
+        rzp.open();
+        e.preventDefault();
+    }
+</script>
+{% endblock %}
