@@ -236,6 +236,7 @@ def init_db():
     app.logger.info("Database initialized")
 
 init_db()
+db_lock = threading.Lock()
 
 ALLOWED_EXTENSIONS = {'xlsx', 'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif'}
 def allowed_file(filename):
@@ -553,8 +554,16 @@ def renew_callback():
 @login_required
 def dashboard():
     conn = get_db_connection()
-    user = conn.execute('SELECT subscription_end_date FROM users WHERE id = ?', (session['user_id'],)).fetchone()
+    cursor = conn.cursor()
+
+    if is_production:
+        cursor.execute('SELECT subscription_end_date FROM users WHERE id = %s', (session['user_id'],))
+    else:
+        cursor.execute('SELECT subscription_end_date FROM users WHERE id = ?', (session['user_id'],))
+
+    user = cursor.fetchone()
     conn.close()
+
     subscription_active = False
     user_subscription_end = "N/A"
     if user and user['subscription_end_date']:
@@ -856,21 +865,29 @@ def start_scheduler():
 @login_required
 def view_emails():
     conn = get_db_connection()
+    cursor = conn.cursor()
     user_email = session.get('user_email')  # Ensure this session variable is set after login
-    
-    # Make sure user_id exists in session and is valid
     if 'user_id' not in session:
         return "Error: User not logged in.", 403
 
-    emails = conn.execute(
-        'SELECT id, recipient_email as email, subject, sent_date, followup_sent, followup_date, body, followup_body '
-        'FROM emails WHERE user_id = ? ORDER BY sent_date DESC',
-        (session['user_id'],)
-    ).fetchall()
-    
+    if is_production:
+        cursor.execute(
+            'SELECT id, recipient_email as email, subject, sent_date, followup_sent, followup_date, body, followup_body '
+            'FROM emails WHERE user_id = %s ORDER BY sent_date DESC',
+            (session['user_id'],)
+        )
+    else:
+        cursor.execute(
+            'SELECT id, recipient_email as email, subject, sent_date, followup_sent, followup_date, body, followup_body '
+            'FROM emails WHERE user_id = ? ORDER BY sent_date DESC',
+            (session['user_id'],)
+        )
+
+    emails = cursor.fetchall()
     conn.close()
     return render_template('emails.html', emails=emails)
 
+    
 @app.route('/send-followup/<int:email_id>', methods=['GET'])
 def send_followup(email_id):
     try:
