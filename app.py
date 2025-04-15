@@ -483,6 +483,10 @@ def renew():
     conn = get_db_connection()
     user = conn.execute('SELECT subscription_end_date FROM users WHERE id = ?', (session['user_id'],)).fetchone()
     conn.close()
+    
+    # end_date = user['subscription_end_date'] if isinstance(user['subscription_end_date'], datetime) else datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S')
+    
+    
     if user and user['subscription_end_date'] and datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S') >= datetime.utcnow():
         flash('Your subscription is still active.', 'info')
         return redirect(url_for('dashboard'))
@@ -567,7 +571,7 @@ def dashboard():
     subscription_active = False
     user_subscription_end = "N/A"
     if user and user['subscription_end_date']:
-        sub_date = datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S')
+        sub_date = user['subscription_end_date'] if isinstance(user['subscription_end_date'], datetime) else datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S')
         user_subscription_end = sub_date.strftime('%B %d, %Y')
         if sub_date >= datetime.utcnow():
             subscription_active = True
