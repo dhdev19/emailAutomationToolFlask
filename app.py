@@ -304,12 +304,15 @@ def login():
             conn.close()
 
             if user and check_password_hash(user['secret_key'], secret_key):
+                
+                
                 if user['subscription_end_date']:
-                    end_date = datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S')
+                    # Check if subscription_end_date is a datetime object
+                    end_date = user['subscription_end_date'] if isinstance(user['subscription_end_date'], datetime) else datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S')
+                    # Compare the datetime objects directly
                     if end_date < datetime.utcnow():
                         flash('Your subscription has expired. Please renew your subscription.', 'error')
                         return redirect(url_for('login'))
-
                 session['user_id'] = user['id']
                 session['user_email'] = user['email']
                 session['user_name'] = user['full_name']
