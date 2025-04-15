@@ -28,12 +28,20 @@ from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, B
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask_wtf.csrf import CSRFProtect
 from email.mime.base import MIMEBase
 from email import encoders
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from werkzeug.security import generate_password_hash, check_password_hash
+from flask_wtf.csrf import CSRFProtect
+
+import threading
+from datetime import datetime
+from flask import session, render_template
+import time
+
+scheduler_running = False
+scheduler_start_time = None
+scheduler_running_lock = threading.Lock()
 
 # Load environment variables from .env file
 load_dotenv()
@@ -50,12 +58,10 @@ elif 'RENDER' in os.environ:
 else:
     base_path = "."
 
-# Configure paths based on environment
 UPLOAD_FOLDER = os.path.join(base_path, "uploads")
 DB_FOLDER = os.path.join(base_path, "database")
 LOG_FOLDER = os.path.join(base_path, "logs")
 
-# Create directories if they don't exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(DB_FOLDER, exist_ok=True)
 os.makedirs(LOG_FOLDER, exist_ok=True)
@@ -63,7 +69,7 @@ os.makedirs(LOG_FOLDER, exist_ok=True)
 # Initialize Flask app
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY')
-from flask_wtf.csrf import CSRFProtect
+
 csrf = CSRFProtect(app)
 
 if not app.secret_key:
@@ -76,7 +82,7 @@ app.config['SESSION_TYPE'] = 'filesystem'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# Configure Razorpay
+# Razorpay Configuration
 RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID')
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET')
 
@@ -89,14 +95,14 @@ if not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET):
 
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
-# Admin email (used to send login credentials)
+# Admin email
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL')
 ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
 
 if not (ADMIN_EMAIL and ADMIN_PASSWORD) and is_production:
     raise ValueError("Admin email credentials must be set in production")
 
-SUBSCRIPTION_AMOUNT = int(os.environ.get('SUBSCRIPTION_AMOUNT', '40000'))  # 400 rupees in paise
+SUBSCRIPTION_AMOUNT = int(os.environ.get('SUBSCRIPTION_AMOUNT', '40000'))
 
 # Flask-Mail Configuration
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
@@ -108,11 +114,8 @@ app.config['MAIL_PASSWORD'] = 'default_password'
 app.config['MAIL_DEFAULT_SENDER'] = 'default_email@example.com'
 mail = Mail(app)
 
-# Set path for database file
+# Path to SQLite DB (used in development)
 DB_PATH = os.path.join(DB_FOLDER, "emails.db")
-
-# Initialize CSRF protection
-csrf = CSRFProtect(app)
 
 # Initialize rate limiter
 limiter = Limiter(
@@ -125,7 +128,6 @@ limiter = Limiter(
 def get_db_connection():
     """Get database connection based on environment"""
     if is_production:
-        # Use MySQL in production (Hostinger)
         db_user = os.environ.get('DB_USER')
         db_password = os.environ.get('DB_PASSWORD')
         db_host = os.environ.get('DB_HOST', 'localhost')
@@ -142,10 +144,9 @@ def get_db_connection():
             cursorclass=pymysql.cursors.DictCursor
         )
     else:
-        # Use SQLite in development
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
-    
+
     return conn
 
 def init_db():
@@ -154,7 +155,7 @@ def init_db():
     c = conn.cursor()
     
     if is_production:
-        # MySQL specific schema
+        # MySQL schema
         c.execute('''
             CREATE TABLE IF NOT EXISTS emails (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -171,14 +172,12 @@ def init_db():
                 followup_body TEXT
             )
         ''')
-        
         c.execute('''
             CREATE TABLE IF NOT EXISTS credentials (
                 email VARCHAR(255) PRIMARY KEY,
                 password VARCHAR(255) NOT NULL
             )
         ''')
-        
         c.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -193,7 +192,7 @@ def init_db():
             )
         ''')
     else:
-        # SQLite schema (for development)
+        # SQLite schema
         c.execute('''
             CREATE TABLE IF NOT EXISTS emails (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,10 +228,10 @@ def init_db():
                 active INTEGER DEFAULT 1
             )
         ''')
-    
+
     conn.commit()
     conn.close()
-    app.logger.info(f"Database initialized")
+    app.logger.info("Database initialized")
 
 init_db()
 
@@ -268,33 +267,47 @@ def login_required(f):
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
-
 # ---------------------- User Authentication & Payment ---------------------- #
 
 @app.route('/')
 def index():
     return redirect(url_for('login'))
 
+
 @app.route('/login', methods=['GET', 'POST'])
 @limiter.limit("10 per minute")
 def login():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
+
     if request.method == 'POST':
         email = request.form.get('email')
         secret_key = request.form.get('secret_key')
+
         if not email or not secret_key:
             flash('Please provide both email and secret key', 'error')
             return render_template('login.html')
+
         try:
             conn = get_db_connection()
-            user = conn.execute(
-                'SELECT * FROM users WHERE email = ? AND active = 1',
-                (email,)
-            ).fetchone()
+            if is_production:
+                sql = 'SELECT * FROM users WHERE email = %s AND active = 1'
+            else:
+                sql = 'SELECT * FROM users WHERE email = ? AND active = 1'
+
+            cursor = conn.cursor()
+            cursor.execute(sql, (email,))
+            row = cursor.fetchone()
+            user = dict(row) if row else None
             conn.close()
+
             if user and check_password_hash(user['secret_key'], secret_key):
-                # login successful
+                if user['subscription_end_date']:
+                    end_date = datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S')
+                    if end_date < datetime.utcnow():
+                        flash('Your subscription has expired. Please renew your subscription.', 'error')
+                        return redirect(url_for('login'))
+
                 session['user_id'] = user['id']
                 session['user_email'] = user['email']
                 session['user_name'] = user['full_name']
@@ -302,54 +315,52 @@ def login():
             else:
                 flash('Invalid email or secret key', 'error')
 
-            conn.close()
-            if user:
-                if user['subscription_end_date'] and datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S') < datetime.utcnow():
-                    flash('Your subscription has expired. Please renew your subscription to send emails.', 'error')
-                session['user_id'] = user['id']
-                session['user_email'] = user['email']
-                session['user_name'] = user['full_name']
-                return redirect(url_for('dashboard'))
-            else:
-                flash('Invalid email or secret key', 'error')
         except Exception as e:
             flash(f'Login error: {str(e)}', 'error')
+
     return render_template('login.html')
+
 
 @app.route('/register', methods=['GET', 'POST'])
 @limiter.limit("5 per minute")
 def register():
-    # Do not insert into DB until payment is complete.
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
+
     if request.method == 'POST':
         full_name = request.form.get('full_name')
         email = request.form.get('email')
+
         if not full_name or not email:
             flash('Please provide both full name and email', 'error')
             return render_template('register.html')
-        # Save registration details temporarily in session
+
         session['temp_user_data'] = {'full_name': full_name, 'email': email}
         return redirect(url_for('payment'))
+
     return render_template('register.html')
+
 
 @app.route('/payment')
 def payment():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
+
     if 'temp_user_data' not in session:
         flash('Please register before proceeding to payment', 'error')
         return redirect(url_for('register'))
+
     try:
         order_amount = SUBSCRIPTION_AMOUNT
         order_currency = 'INR'
-        # Use a shorter receipt string to meet Razorpay limits.
         order_receipt = f"rcpt_{int(time.time())}"
+
         razorpay_order = razorpay_client.order.create({
             'amount': order_amount,
             'currency': order_currency,
             'receipt': order_receipt,
         })
+
         payment_data = {
             'key': RAZORPAY_KEY_ID,
             'amount': order_amount,
@@ -357,53 +368,72 @@ def payment():
             'name': 'Email Automation Tool',
             'description': 'Monthly Subscription',
             'order_id': razorpay_order['id'],
-            'prefill': {
-                'name': session['temp_user_data']['full_name'],
-                'email': session['temp_user_data']['email']
-            },
+            'prefill': session['temp_user_data'],
             'theme': {'color': '#3498db'}
         }
+
         return render_template('payment.html', payment=payment_data)
+
     except Exception as e:
         flash(f'Payment initialization error: {str(e)}', 'error')
         return redirect(url_for('register'))
+
 
 @app.route('/payment/callback', methods=['POST'])
 def payment_callback():
     if 'temp_user_data' not in session:
         flash('Invalid payment session', 'error')
         return redirect(url_for('register'))
+
     try:
         payment_id = request.form.get('razorpay_payment_id', '')
         order_id = request.form.get('razorpay_order_id', '')
         signature = request.form.get('razorpay_signature', '')
+
         params_dict = {
             'razorpay_payment_id': payment_id,
             'razorpay_order_id': order_id,
             'razorpay_signature': signature
         }
+
         try:
             razorpay_client.utility.verify_payment_signature(params_dict)
             payment_verified = True
         except Exception:
             payment_verified = False
+
         if payment_verified:
-            secret_key = generate_secret_key()
-            subscription_end_date = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
-            
-            # Use hashed password for security
-            hashed_secret = encrypt_password(secret_key)
-            
-            conn = get_db_connection()
-            c = conn.cursor()
             full_name = session['temp_user_data']['full_name']
             email = session['temp_user_data']['email']
-            c.execute('''
-                INSERT INTO users (full_name, email, secret_key, registration_date, payment_status, subscription_end_date, active)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (full_name, email, hashed_secret, datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'), 'completed', subscription_end_date, 1))
+            secret_key = generate_secret_key()
+            hashed_secret = encrypt_password(secret_key)
+            subscription_end_date = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
+            registration_date = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+
+            conn = get_db_connection()
+            cursor = conn.cursor()
+
+            if is_production:
+                sql = '''
+                    INSERT INTO users (full_name, email, secret_key, registration_date, payment_status, subscription_end_date, active)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                '''
+            else:
+                sql = '''
+                    INSERT INTO users (full_name, email, secret_key, registration_date, payment_status, subscription_end_date, active)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                '''
+
+            cursor.execute(sql, (
+                full_name, email, hashed_secret,
+                registration_date, 'completed',
+                subscription_end_date, 1
+            ))
+
             conn.commit()
             conn.close()
+
+            # Send credentials email
             subject = "Your Email Automation Tool Credentials"
             body = f"""
 Hello {full_name},
@@ -423,12 +453,15 @@ Email Automation Tool Team
             session.pop('temp_user_data', None)
             flash('Payment successful! Your account has been created. Please check your email for credentials.', 'success')
             return redirect(url_for('login'))
+
         else:
             flash('Payment verification failed. Please try again.', 'error')
             return redirect(url_for('payment'))
+
     except Exception as e:
         flash(f'Payment processing error: {str(e)}', 'error')
         return redirect(url_for('register'))
+
 
 @app.route('/logout')
 def logout():
@@ -489,8 +522,15 @@ def renew_callback():
         if payment_verified:
             subscription_end_date = (datetime.utcnow() + timedelta(days=30)).strftime('%Y-%m-%d %H:%M:%S')
             conn = get_db_connection()
-            conn.execute('UPDATE users SET subscription_end_date = ?, payment_id = ?, payment_status = ? WHERE id = ?',
-                         (subscription_end_date, payment_id, 'renewed', session['user_id']))
+            if is_production:
+                sql = '''
+                    UPDATE users SET subscription_end_date = %s, payment_id = %s, payment_status = %s WHERE id = %s
+                '''
+            else:
+                sql = '''
+                    UPDATE users SET subscription_end_date = ?, payment_id = ?, payment_status = ? WHERE id = ?
+                '''
+            conn.execute(sql, (subscription_end_date, payment_id, 'renewed', session['user_id']))
             conn.commit()
             conn.close()
             flash('Subscription renewed successfully!', 'success')
@@ -622,7 +662,11 @@ def dashboard():
         for _, row in login_df.iterrows():
             em = row["email"]
             pw = row["password"]
-            c.execute('INSERT OR REPLACE INTO credentials (email, password) VALUES (?, ?)', (em, pw))
+            if is_production:
+                sql = 'INSERT INTO credentials (email, password) VALUES (%s, %s) ON DUPLICATE KEY UPDATE password = VALUES(password)'
+            else:
+                sql = 'INSERT OR REPLACE INTO credentials (email, password) VALUES (?, ?)'
+            c.execute(sql, (em, pw))
         conn.commit()
         # Iterate through recipients, sending emails and storing records with the current user's id.
         for i, rec_row in recipients_df.iterrows():
@@ -641,10 +685,17 @@ def dashboard():
                         msg.attach(os.path.basename(attach), "application/octet-stream", f.read())
                 mail.send(msg)
                 emails_sent += 1
-                c.execute('''
-                    INSERT INTO emails (user_id, sender_email, sender_password, recipient_email, recipient_name, subject, body, sent_date, followup_date, followup_body)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
+                if is_production:
+                    sql = '''
+                        INSERT INTO emails (user_id, sender_email, sender_password, recipient_email, recipient_name, subject, body, sent_date, followup_date, followup_body)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    '''
+                else:
+                    sql = '''
+                        INSERT INTO emails (user_id, sender_email, sender_password, recipient_email, recipient_name, subject, body, sent_date, followup_date, followup_body)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    '''
+                c.execute(sql, (
                     session['user_id'],
                     sender_email,
                     sender_password,
@@ -690,13 +741,20 @@ def followup_scheduler():
         print(f"Scheduler check #{loop_count} at {datetime.now()}")
         try:
             conn = get_db_connection()
-            conn.row_factory = sqlite3.Row
+            
+            # Set row_factory only if SQLite is used
+            is_production = os.environ.get('FLASK_ENV') == 'production'
+            if not is_production:
+                conn.row_factory = sqlite3.Row  # Only set this for SQLite
+            
             c = conn.cursor()
             now = datetime.now()
             current_time = now.strftime("%Y-%m-%d %H:%M:%S")
             print(f"Current time for comparison: {current_time}")
+            
+            # Check for the existence of the 'emails' table
             try:
-                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='emails'")
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='emails'")  # This is specific to SQLite
                 if not c.fetchone():
                     print("Error: 'emails' table does not exist in the database.")
                     time.sleep(60)
@@ -705,16 +763,29 @@ def followup_scheduler():
                 print(f"Database structure check error: {str(db_err)}")
                 time.sleep(60)
                 continue
-            # Optionally, you can filter follow-ups for the current user here if desired.
-            c.execute('''
-                SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body, followup_date
-                FROM emails 
-                WHERE followup_date <= ? 
-                AND followup_sent = 0
-                AND followup_body IS NOT NULL
-            ''', (current_time,))
+
+            # Check the database type (MySQL or SQLite) based on environment variable or config
+            if is_production:  # MySQL
+                query = '''
+                    SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body, followup_date
+                    FROM emails 
+                    WHERE followup_date <= %s 
+                    AND followup_sent = 0
+                    AND followup_body IS NOT NULL
+                '''
+            else:  # SQLite
+                query = '''
+                    SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body, followup_date
+                    FROM emails 
+                    WHERE followup_date <= ? 
+                    AND followup_sent = 0
+                    AND followup_body IS NOT NULL
+                '''
+
+            c.execute(query, (current_time,))
             emails_to_followup = c.fetchall()
             print(f"Found {len(emails_to_followup)} emails due for follow-up")
+            
             for email in emails_to_followup:
                 email_id = email['id']
                 sender_email = email['sender_email']
@@ -744,7 +815,12 @@ def followup_scheduler():
                             msg = Message(followup_subject, recipients=[recipient_email])
                             msg.body = f"Hello {recipient_name},\n\n{followup_body}"
                             mail_instance.send(msg)
-                            c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
+                             # Update followup_sent status after sending
+                            if is_production:  # MySQL
+                                c.execute('UPDATE emails SET followup_sent = %s WHERE id = %s', (1, email_id))
+                            else:  # SQLite
+                                c.execute('UPDATE emails SET followup_sent = ? WHERE id = ?', (1, email_id))
+                            
                             conn.commit()
                             print(f"Successfully sent follow-up to {recipient_email}")
                 except Exception as e:
@@ -757,30 +833,36 @@ def followup_scheduler():
 
 def start_scheduler():
     global scheduler_running, scheduler_start_time
-    scheduler_running = False
-    scheduler_start_time = None
-    print("start_scheduler function called")
-    if not scheduler_running:
+    with scheduler_running_lock:
+        if scheduler_running:
+            print("Scheduler already running, not starting a new thread")
+            return
+
+        scheduler_running = True
         scheduler_start_time = datetime.now()
+        print("start_scheduler function called")
+        
         scheduler_thread = threading.Thread(target=followup_scheduler)
         scheduler_thread.daemon = True
         scheduler_thread.start()
-        scheduler_running = True
         print("Scheduler thread started")
-    else:
-        print("Scheduler already running, not starting a new thread")
 
 @app.route('/emails')
 @login_required
 def view_emails():
     conn = get_db_connection()
-    # Filter emails to show only those sent by the current user.
-    user_email = session.get('user_email')
+    user_email = session.get('user_email')  # Ensure this session variable is set after login
+    
+    # Make sure user_id exists in session and is valid
+    if 'user_id' not in session:
+        return "Error: User not logged in.", 403
+
     emails = conn.execute(
         'SELECT id, recipient_email as email, subject, sent_date, followup_sent, followup_date, body, followup_body '
         'FROM emails WHERE user_id = ? ORDER BY sent_date DESC',
         (session['user_id'],)
     ).fetchall()
+    
     conn.close()
     return render_template('emails.html', emails=emails)
 
@@ -788,13 +870,31 @@ def view_emails():
 def send_followup(email_id):
     try:
         conn = get_db_connection()
-        conn.row_factory = sqlite3.Row
+
+        # Conditionally use row_factory if using SQLite
+        if not is_production:
+            conn.row_factory = sqlite3.Row
+
         c = conn.cursor()
-        c.execute('SELECT * FROM emails WHERE id = ?', (email_id,))
-        email = c.fetchone()
-        if not email:
+
+        # Use different query placeholder syntax based on DB
+        if is_production:
+            c.execute('SELECT * FROM emails WHERE id = %s', (email_id,))
+        else:
+            c.execute('SELECT * FROM emails WHERE id = ?', (email_id,))
+
+        row = c.fetchone()
+
+        if not row:
             flash(f"Email ID {email_id} not found", "error")
             return redirect('/emails')
+
+        # Handle row access depending on DB
+        if is_production:
+            email = dict(zip([desc[0] for desc in c.description], row))
+        else:
+            email = row
+
         def send_single_followup():
             if email['followup_sent'] == 1:
                 flash(f"Follow-up for email ID {email_id} was already sent", "warning")
@@ -816,25 +916,35 @@ def send_followup(email_id):
                 mail_app = Flask(f"mail_app_{email_id}")
                 for key, value in mail_config.items():
                     mail_app.config[key] = value
+
                 with mail_app.app_context():
                     mail_instance = Mail(mail_app)
                     followup_subject = f"Follow-up: {email['subject']}"
                     msg = Message(followup_subject, recipients=[email['recipient_email']])
                     msg.body = f"Hello {email['recipient_name']},\n\n{email['followup_body']}"
                     mail_instance.send(msg)
-                    c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
-                    conn.commit()
+
+                    # Use proper placeholder again with lock
+                    with db_lock:
+                        if is_production:
+                            c.execute('UPDATE emails SET followup_sent = 1 WHERE id = %s', (email_id,))
+                        else:
+                            c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
+                        
+                        conn.commit()
                     flash(f"Follow-up email sent to {email['recipient_email']}", "success")
                     return True
             except Exception as e:
                 flash(f"Error sending follow-up: {str(e)}", "error")
                 return False
+
         send_single_followup()
         conn.close()
         return redirect('/emails')
     except Exception as e:
         flash(f"Error processing follow-up: {str(e)}", "error")
         return redirect('/emails')
+
 
 @app.route('/check-followups')
 def check_followups():
@@ -882,8 +992,11 @@ def check_followups():
                         msg = Message(followup_subject, recipients=[recipient_email])
                         msg.body = f"Hello {recipient_name},\n\n{followup_body}"
                         mail_instance.send(msg)
-                        c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
-                        conn.commit()
+                        
+                        # Use lock for database updates
+                        with db_lock:
+                            c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
+                            conn.commit()
                         sent_count += 1
             except Exception as e:
                 errors.append(f"Error sending follow-up to {recipient_email}: {str(e)}")
@@ -898,6 +1011,9 @@ def check_followups():
     except Exception as e:
         flash(f"Error checking follow-ups: {str(e)}", "error")
     return redirect('/server-status')
+
+
+
 
 @app.route('/server-status')
 def server_status():
