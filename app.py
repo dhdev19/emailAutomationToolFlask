@@ -132,6 +132,7 @@ def get_db_connection():
         db_password = os.environ.get('DB_PASSWORD')
         db_host = os.environ.get('DB_HOST', 'localhost')
         db_name = os.environ.get('DB_NAME')
+        db_port = os.environ.get('DB_PORT', 3306)
         
         if not all([db_user, db_password, db_name]):
             raise ValueError("Database credentials must be set in production")
@@ -141,6 +142,7 @@ def get_db_connection():
             user=db_user,
             password=db_password,
             database=db_name,
+            port=int(db_port),
             cursorclass=pymysql.cursors.DictCursor
         )
     else:
