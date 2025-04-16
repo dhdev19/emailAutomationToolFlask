@@ -1439,6 +1439,7 @@ def test_error(error_type):
 if __name__ == '__main__':
     if os.environ.get('FLASK_ENV') == 'production':
         configure_logging()
+        print("Calling start_scheduler()...") 
         start_scheduler()
     port = int(os.environ.get("PORT", 5000))
     debug_mode = os.environ.get('FLASK_ENV') != 'production'
