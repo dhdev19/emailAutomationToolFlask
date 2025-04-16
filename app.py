@@ -11,6 +11,7 @@ import pandas as pd
 from flask_mail import Mail, Message
 from werkzeug.utils import secure_filename
 import random
+import subprocess
 import string
 import math
 import threading
@@ -956,12 +957,11 @@ def start_scheduler():
         scheduler_start_time = datetime.now()
         print("start_scheduler function called")
         
-        scheduler_thread = threading.Thread(target=followup_scheduler)
-        scheduler_thread.daemon = True
-        scheduler_thread.start()
-        print("Scheduler thread started")
-
-
+        # scheduler_thread = threading.Thread(target=followup_scheduler)
+        # scheduler_thread.daemon = True
+        # scheduler_thread.start()
+        # print("Scheduler thread started")
+        subprocess.Popen(['python', 'scheduler.py'])
 
 @app.route('/emails')
 @login_required
