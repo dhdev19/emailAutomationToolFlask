@@ -1,3 +1,9 @@
+from flask import Flask, request, redirect, flash
+import sqlite3
+import pymysql
+import smtplib
+from email.mime.text import MIMEText
+import traceback
 from flask import Flask, render_template, request, redirect, flash, jsonify, session, url_for, abort
 import os
 from dotenv import load_dotenv
@@ -751,6 +757,105 @@ def dashboard():
 
 # ---------------------- Follow-Up Scheduler & Manual Trigger ---------------------- #
 
+# def followup_scheduler():
+#     print("Follow-up scheduler started")
+#     loop_count = 0
+#     while True:
+#         loop_count += 1
+#         print(f"Scheduler check #{loop_count} at {datetime.now()}")
+#         try:
+#             conn = get_db_connection()
+            
+#             # Set row_factory only if SQLite is used
+#             is_production = os.environ.get('FLASK_ENV') == 'production'
+#             if not is_production:
+#                 conn.row_factory = sqlite3.Row  # Only set this for SQLite
+            
+#             c = conn.cursor()
+#             now = datetime.now()
+#             current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+#             print(f"Current time for comparison: {current_time}")
+            
+#             # Check for the existence of the 'emails' table
+#             try:
+#                 c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='emails'")  # This is specific to SQLite
+#                 if not c.fetchone():
+#                     print("Error: 'emails' table does not exist in the database.")
+#                     time.sleep(60)
+#                     continue
+#             except Exception as db_err:
+#                 print(f"Database structure check error: {str(db_err)}")
+#                 time.sleep(60)
+#                 continue
+
+#             # Check the database type (MySQL or SQLite) based on environment variable or config
+#             if is_production:  # MySQL
+#                 query = '''
+#                     SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body, followup_date
+#                     FROM emails 
+#                     WHERE followup_date <= %s 
+#                     AND followup_sent = 0
+#                     AND followup_body IS NOT NULL
+#                 '''
+#             else:  # SQLite
+#                 query = '''
+#                     SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body, followup_date
+#                     FROM emails 
+#                     WHERE followup_date <= ? 
+#                     AND followup_sent = 0
+#                     AND followup_body IS NOT NULL
+#                 '''
+
+#             c.execute(query, (current_time,))
+#             emails_to_followup = c.fetchall()
+#             print(f"Found {len(emails_to_followup)} emails due for follow-up")
+            
+#             for email in emails_to_followup:
+#                 email_id = email['id']
+#                 sender_email = email['sender_email']
+#                 sender_password = email['sender_password']
+#                 recipient_email = email['recipient_email']
+#                 recipient_name = email['recipient_name']
+#                 subject = email['subject']
+#                 followup_body = email['followup_body']
+#                 print(f"Sending follow-up to {recipient_email} from {sender_email}")
+#                 try:
+#                     with app.app_context():
+#                         mail_config = {
+#                             'MAIL_SERVER': 'smtp.gmail.com',
+#                             'MAIL_PORT': 587,
+#                             'MAIL_USE_TLS': True,
+#                             'MAIL_USE_SSL': False,
+#                             'MAIL_USERNAME': sender_email,
+#                             'MAIL_PASSWORD': sender_password,
+#                             'MAIL_DEFAULT_SENDER': sender_email
+#                         }
+#                         mail_app = Flask(f"mail_app_{email_id}")
+#                         for key, value in mail_config.items():
+#                             mail_app.config[key] = value
+#                         with mail_app.app_context():
+#                             mail_instance = Mail(mail_app)
+#                             followup_subject = f"Follow-up: {subject}"
+#                             msg = Message(followup_subject, recipients=[recipient_email])
+#                             msg.body = f"Hello {recipient_name},\n\n{followup_body}"
+#                             mail_instance.send(msg)
+#                              # Update followup_sent status after sending
+#                             if is_production:  # MySQL
+#                                 c.execute('UPDATE emails SET followup_sent = %s WHERE id = %s', (1, email_id))
+#                             else:  # SQLite
+#                                 c.execute('UPDATE emails SET followup_sent = ? WHERE id = ?', (1, email_id))
+                            
+#                             conn.commit()
+#                             print(f"Successfully sent follow-up to {recipient_email}")
+#                 except Exception as e:
+#                     print(f"Error sending follow-up to {recipient_email}: {str(e)}")
+#             conn.close()
+#             time.sleep(60)
+#         except Exception as e:
+#             print(f"Error in follow-up scheduler: {str(e)}")
+#             time.sleep(30)
+
+
 def followup_scheduler():
     print("Follow-up scheduler started")
     loop_count = 0
@@ -763,37 +868,33 @@ def followup_scheduler():
             # Set row_factory only if SQLite is used
             is_production = os.environ.get('FLASK_ENV') == 'production'
             if not is_production:
-                conn.row_factory = sqlite3.Row  # Only set this for SQLite
+                conn.row_factory = sqlite3.Row
             
             c = conn.cursor()
             now = datetime.now()
             current_time = now.strftime("%Y-%m-%d %H:%M:%S")
             print(f"Current time for comparison: {current_time}")
-            
-            # Check for the existence of the 'emails' table
-            try:
-                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='emails'")  # This is specific to SQLite
+
+            # Check for table existence (SQLite specific)
+            if not is_production:
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='emails'")
                 if not c.fetchone():
                     print("Error: 'emails' table does not exist in the database.")
                     time.sleep(60)
                     continue
-            except Exception as db_err:
-                print(f"Database structure check error: {str(db_err)}")
-                time.sleep(60)
-                continue
 
-            # Check the database type (MySQL or SQLite) based on environment variable or config
-            if is_production:  # MySQL
+            # Query for pending follow-ups
+            if is_production:
                 query = '''
-                    SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body, followup_date
+                    SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body
                     FROM emails 
                     WHERE followup_date <= %s 
                     AND followup_sent = 0
                     AND followup_body IS NOT NULL
                 '''
-            else:  # SQLite
+            else:
                 query = '''
-                    SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body, followup_date
+                    SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body
                     FROM emails 
                     WHERE followup_date <= ? 
                     AND followup_sent = 0
@@ -812,42 +913,37 @@ def followup_scheduler():
                 recipient_name = email['recipient_name']
                 subject = email['subject']
                 followup_body = email['followup_body']
+
                 print(f"Sending follow-up to {recipient_email} from {sender_email}")
                 try:
-                    with app.app_context():
-                        mail_config = {
-                            'MAIL_SERVER': 'smtp.gmail.com',
-                            'MAIL_PORT': 587,
-                            'MAIL_USE_TLS': True,
-                            'MAIL_USE_SSL': False,
-                            'MAIL_USERNAME': sender_email,
-                            'MAIL_PASSWORD': sender_password,
-                            'MAIL_DEFAULT_SENDER': sender_email
-                        }
-                        mail_app = Flask(f"mail_app_{email_id}")
-                        for key, value in mail_config.items():
-                            mail_app.config[key] = value
-                        with mail_app.app_context():
-                            mail_instance = Mail(mail_app)
-                            followup_subject = f"Follow-up: {subject}"
-                            msg = Message(followup_subject, recipients=[recipient_email])
-                            msg.body = f"Hello {recipient_name},\n\n{followup_body}"
-                            mail_instance.send(msg)
-                             # Update followup_sent status after sending
-                            if is_production:  # MySQL
-                                c.execute('UPDATE emails SET followup_sent = %s WHERE id = %s', (1, email_id))
-                            else:  # SQLite
-                                c.execute('UPDATE emails SET followup_sent = ? WHERE id = ?', (1, email_id))
-                            
-                            conn.commit()
-                            print(f"Successfully sent follow-up to {recipient_email}")
+                    msg = MIMEText(f"Hello {recipient_name},\n\n{followup_body}")
+                    msg['Subject'] = f"Follow-up: {subject}"
+                    msg['From'] = sender_email
+                    msg['To'] = recipient_email
+
+                    with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                        server.starttls()
+                        server.login(sender_email, sender_password)
+                        server.sendmail(sender_email, recipient_email, msg.as_string())
+
+                    # Update followup_sent status
+                    if is_production:
+                        c.execute('UPDATE emails SET followup_sent = %s WHERE id = %s', (1, email_id))
+                    else:
+                        c.execute('UPDATE emails SET followup_sent = ? WHERE id = ?', (1, email_id))
+                    
+                    conn.commit()
+                    print(f"✅ Successfully sent follow-up to {recipient_email}")
                 except Exception as e:
-                    print(f"Error sending follow-up to {recipient_email}: {str(e)}")
+                    print(f"❌ Error sending follow-up to {recipient_email}: {str(e)}")
+
             conn.close()
             time.sleep(60)
+
         except Exception as e:
-            print(f"Error in follow-up scheduler: {str(e)}")
+            print(f"🔥 Error in follow-up scheduler: {str(e)}")
             time.sleep(30)
+
 
 def start_scheduler():
     global scheduler_running, scheduler_start_time
@@ -864,6 +960,8 @@ def start_scheduler():
         scheduler_thread.daemon = True
         scheduler_thread.start()
         print("Scheduler thread started")
+
+
 
 @app.route('/emails')
 @login_required
@@ -892,6 +990,86 @@ def view_emails():
     return render_template('emails.html', emails=emails)
 
     
+# @app.route('/send-followup/<int:email_id>', methods=['GET'])
+# def send_followup(email_id):
+#     try:
+#         conn = get_db_connection()
+
+#         # Conditionally use row_factory if using SQLite
+#         if not is_production:
+#             conn.row_factory = sqlite3.Row
+
+#         c = conn.cursor()
+
+#         # Use different query placeholder syntax based on DB
+#         if is_production:
+#             c.execute('SELECT * FROM emails WHERE id = %s', (email_id,))
+#         else:
+#             c.execute('SELECT * FROM emails WHERE id = ?', (email_id,))
+
+#         row = c.fetchone()
+
+#         if not row:
+#             flash(f"Email ID {email_id} not found", "error")
+#             return redirect('/emails')
+
+#         # Handle row access depending on DB
+#         if is_production:
+#             email = dict(zip([desc[0] for desc in c.description], row))
+#         else:
+#             email = row
+
+#         def send_single_followup():
+#             if email['followup_sent'] == 1:
+#                 flash(f"Follow-up for email ID {email_id} was already sent", "warning")
+#                 return False
+#             if not email['followup_body']:
+#                 flash(f"Email ID {email_id} has no follow-up message", "error")
+#                 return False
+#             try:
+#                 sender_password = email['sender_password']
+#                 mail_config = {
+#                     'MAIL_SERVER': 'smtp.gmail.com',
+#                     'MAIL_PORT': 587,
+#                     'MAIL_USE_TLS': True,
+#                     'MAIL_USE_SSL': False,
+#                     'MAIL_USERNAME': email['sender_email'],
+#                     'MAIL_PASSWORD': sender_password,
+#                     'MAIL_DEFAULT_SENDER': email['sender_email']
+#                 }
+#                 mail_app = Flask(f"mail_app_{email_id}")
+#                 for key, value in mail_config.items():
+#                     mail_app.config[key] = value
+
+#                 with mail_app.app_context():
+#                     mail_instance = Mail(mail_app)
+#                     followup_subject = f"Follow-up: {email['subject']}"
+#                     msg = Message(followup_subject, recipients=[email['recipient_email']])
+#                     msg.body = f"Hello {email['recipient_name']},\n\n{email['followup_body']}"
+#                     mail_instance.send(msg)
+
+#                     # Use proper placeholder again with lock
+#                     with db_lock:
+#                         if is_production:
+#                             c.execute('UPDATE emails SET followup_sent = 1 WHERE id = %s', (email_id,))
+#                         else:
+#                             c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
+                        
+#                         conn.commit()
+#                     flash(f"Follow-up email sent to {email['recipient_email']}", "success")
+#                     return True
+#             except Exception as e:
+#                 flash(f"Error sending follow-up: {str(e)}", "error")
+#                 return False
+
+#         send_single_followup()
+#         conn.close()
+#         return redirect('/emails')
+#     except Exception as e:
+#         flash(f"Error processing follow-up: {str(e)}", "error")
+#         return redirect('/emails')
+
+
 @app.route('/send-followup/<int:email_id>', methods=['GET'])
 def send_followup(email_id):
     try:
@@ -903,7 +1081,7 @@ def send_followup(email_id):
 
         c = conn.cursor()
 
-        # Use different query placeholder syntax based on DB
+        # Use correct placeholder style
         if is_production:
             c.execute('SELECT * FROM emails WHERE id = %s', (email_id,))
         else:
@@ -915,7 +1093,7 @@ def send_followup(email_id):
             flash(f"Email ID {email_id} not found", "error")
             return redirect('/emails')
 
-        # Handle row access depending on DB
+        # Handle row access depending on DB type
         if is_production:
             email = dict(zip([desc[0] for desc in c.description], row))
         else:
@@ -928,48 +1106,118 @@ def send_followup(email_id):
             if not email['followup_body']:
                 flash(f"Email ID {email_id} has no follow-up message", "error")
                 return False
+
             try:
+                sender_email = email['sender_email']
                 sender_password = email['sender_password']
-                mail_config = {
-                    'MAIL_SERVER': 'smtp.gmail.com',
-                    'MAIL_PORT': 587,
-                    'MAIL_USE_TLS': True,
-                    'MAIL_USE_SSL': False,
-                    'MAIL_USERNAME': email['sender_email'],
-                    'MAIL_PASSWORD': sender_password,
-                    'MAIL_DEFAULT_SENDER': email['sender_email']
-                }
-                mail_app = Flask(f"mail_app_{email_id}")
-                for key, value in mail_config.items():
-                    mail_app.config[key] = value
+                recipient_email = email['recipient_email']
+                subject = f"Follow-up: {email['subject']}"
+                body = f"Hello {email['recipient_name']},\n\n{email['followup_body']}"
 
-                with mail_app.app_context():
-                    mail_instance = Mail(mail_app)
-                    followup_subject = f"Follow-up: {email['subject']}"
-                    msg = Message(followup_subject, recipients=[email['recipient_email']])
-                    msg.body = f"Hello {email['recipient_name']},\n\n{email['followup_body']}"
-                    mail_instance.send(msg)
+                # Construct email
+                msg = MIMEText(body)
+                msg['Subject'] = subject
+                msg['From'] = sender_email
+                msg['To'] = recipient_email
 
-                    # Use proper placeholder again with lock
-                    with db_lock:
-                        if is_production:
-                            c.execute('UPDATE emails SET followup_sent = 1 WHERE id = %s', (email_id,))
-                        else:
-                            c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
-                        
-                        conn.commit()
-                    flash(f"Follow-up email sent to {email['recipient_email']}", "success")
-                    return True
+                # Send using smtplib
+                with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                    server.starttls()
+                    server.login(sender_email, sender_password)
+                    server.sendmail(sender_email, [recipient_email], msg.as_string())
+
+                # Update followup_sent status
+                with db_lock:
+                    if is_production:
+                        c.execute('UPDATE emails SET followup_sent = 1 WHERE id = %s', (email_id,))
+                    else:
+                        c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
+                    conn.commit()
+
+                flash(f"Follow-up email sent to {recipient_email}", "success")
+                return True
+
             except Exception as e:
+                traceback.print_exc()
                 flash(f"Error sending follow-up: {str(e)}", "error")
                 return False
 
         send_single_followup()
         conn.close()
         return redirect('/emails')
+
     except Exception as e:
+        traceback.print_exc()
         flash(f"Error processing follow-up: {str(e)}", "error")
         return redirect('/emails')
+
+
+# @app.route('/check-followups')
+# def check_followups():
+#     try:
+#         conn = get_db_connection()
+#         conn.row_factory = sqlite3.Row
+#         c = conn.cursor()
+#         now = datetime.now()
+#         current_time = now.strftime("%Y-%m-%d %H:%M:%S")
+#         c.execute('''
+#             SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body 
+#             FROM emails 
+#             WHERE followup_date <= ? 
+#             AND followup_sent = 0
+#             AND followup_body IS NOT NULL
+#         ''', (current_time,))
+#         emails_to_followup = c.fetchall()
+#         sent_count = 0
+#         errors = []
+#         for email in emails_to_followup:
+#             email_id = email['id']
+#             sender_email = email['sender_email']
+#             sender_password = email['sender_password']
+#             recipient_email = email['recipient_email']
+#             recipient_name = email['recipient_name']
+#             subject = email['subject']
+#             followup_body = email['followup_body']
+#             try:
+#                 with app.app_context():
+#                     mail_config = {
+#                         'MAIL_SERVER': 'smtp.gmail.com',
+#                         'MAIL_PORT': 587,
+#                         'MAIL_USE_TLS': True,
+#                         'MAIL_USE_SSL': False,
+#                         'MAIL_USERNAME': sender_email,
+#                         'MAIL_PASSWORD': sender_password,
+#                         'MAIL_DEFAULT_SENDER': sender_email
+#                     }
+#                     mail_app = Flask(f"mail_app_{email_id}")
+#                     for key, value in mail_config.items():
+#                         mail_app.config[key] = value
+#                     with mail_app.app_context():
+#                         mail_instance = Mail(mail_app)
+#                         followup_subject = f"Follow-up: {subject}"
+#                         msg = Message(followup_subject, recipients=[recipient_email])
+#                         msg.body = f"Hello {recipient_name},\n\n{followup_body}"
+#                         mail_instance.send(msg)
+                        
+#                         # Use lock for database updates
+#                         with db_lock:
+#                             c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
+#                             conn.commit()
+#                         sent_count += 1
+#             except Exception as e:
+#                 errors.append(f"Error sending follow-up to {recipient_email}: {str(e)}")
+#         conn.close()
+#         if sent_count > 0:
+#             flash(f"Manually sent {sent_count} follow-up emails", "success")
+#         if errors:
+#             for error in errors:
+#                 flash(error, "error")
+#         if sent_count == 0 and not errors:
+#             flash("No follow-up emails needed to be sent at this time", "info")
+#     except Exception as e:
+#         flash(f"Error checking follow-ups: {str(e)}", "error")
+#     return redirect('/server-status')
+
 
 
 @app.route('/check-followups')
@@ -990,6 +1238,7 @@ def check_followups():
         emails_to_followup = c.fetchall()
         sent_count = 0
         errors = []
+
         for email in emails_to_followup:
             email_id = email['id']
             sender_email = email['sender_email']
@@ -998,34 +1247,26 @@ def check_followups():
             recipient_name = email['recipient_name']
             subject = email['subject']
             followup_body = email['followup_body']
+
             try:
-                with app.app_context():
-                    mail_config = {
-                        'MAIL_SERVER': 'smtp.gmail.com',
-                        'MAIL_PORT': 587,
-                        'MAIL_USE_TLS': True,
-                        'MAIL_USE_SSL': False,
-                        'MAIL_USERNAME': sender_email,
-                        'MAIL_PASSWORD': sender_password,
-                        'MAIL_DEFAULT_SENDER': sender_email
-                    }
-                    mail_app = Flask(f"mail_app_{email_id}")
-                    for key, value in mail_config.items():
-                        mail_app.config[key] = value
-                    with mail_app.app_context():
-                        mail_instance = Mail(mail_app)
-                        followup_subject = f"Follow-up: {subject}"
-                        msg = Message(followup_subject, recipients=[recipient_email])
-                        msg.body = f"Hello {recipient_name},\n\n{followup_body}"
-                        mail_instance.send(msg)
-                        
-                        # Use lock for database updates
-                        with db_lock:
-                            c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
-                            conn.commit()
-                        sent_count += 1
+                msg = MIMEText(f"Hello {recipient_name},\n\n{followup_body}")
+                msg['Subject'] = f"Follow-up: {subject}"
+                msg['From'] = sender_email
+                msg['To'] = recipient_email
+
+                with smtplib.SMTP('smtp.gmail.com', 587) as server:
+                    server.starttls()
+                    server.login(sender_email, sender_password)
+                    server.sendmail(sender_email, recipient_email, msg.as_string())
+
+                # Update followup_sent with lock
+                with db_lock:
+                    c.execute('UPDATE emails SET followup_sent = 1 WHERE id = ?', (email_id,))
+                    conn.commit()
+                sent_count += 1
             except Exception as e:
                 errors.append(f"Error sending follow-up to {recipient_email}: {str(e)}")
+
         conn.close()
         if sent_count > 0:
             flash(f"Manually sent {sent_count} follow-up emails", "success")
@@ -1034,8 +1275,10 @@ def check_followups():
                 flash(error, "error")
         if sent_count == 0 and not errors:
             flash("No follow-up emails needed to be sent at this time", "info")
+
     except Exception as e:
         flash(f"Error checking follow-ups: {str(e)}", "error")
+
     return redirect('/server-status')
 
 
