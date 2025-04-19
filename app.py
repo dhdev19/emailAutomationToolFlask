@@ -887,12 +887,29 @@ def followup_scheduler():
             # Query for pending follow-ups
             if is_production:
                 query = '''
-                    SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body
-                    FROM emails 
-                    WHERE followup_date <= %s 
-                    AND followup_sent = 0
-                    AND followup_body IS NOT NULL
+                SELECT 
+                    emails.id, 
+                    emails.sender_email, 
+                    emails.sender_password, 
+                    emails.recipient_email, 
+                    emails.recipient_name, 
+                    emails.subject, 
+                    emails.followup_body
+                FROM 
+                    emails
+                JOIN 
+                    users ON emails.id = users.id
+                WHERE 
+                    emails.followup_date <= %s
+                    AND emails.followup_sent = 0
+                    AND emails.followup_body IS NOT NULL
+                    AND users.subscription_end_date >= CURRENT_TIMESTAMP
                 '''
+                    # SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body
+                    # FROM emails 
+                    # WHERE followup_date <= %s 
+                    # AND followup_sent = 0
+                    # AND followup_body IS NOT NULL
             else:
                 query = '''
                     SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body
@@ -987,7 +1004,23 @@ def view_emails():
 
     emails = cursor.fetchall()
     conn.close()
-    return render_template('emails.html', emails=emails)
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    if is_production:
+        cursor.execute('SELECT subscription_end_date FROM users WHERE id = %s', (session['user_id'],))
+    else:
+        cursor.execute('SELECT subscription_end_date FROM users WHERE id = ?', (session['user_id'],))
+
+    user = cursor.fetchone()
+    conn.close()
+
+    user_subscription_end = "N/A"
+    if user and user['subscription_end_date']:
+        sub_date = user['subscription_end_date'] if isinstance(user['subscription_end_date'], datetime) else datetime.strptime(user['subscription_end_date'], '%Y-%m-%d %H:%M:%S')
+        user_subscription_end = sub_date.strftime('%B %d, %Y')
+    return render_template('emails.html', emails=emails,user_subscription_end=user_subscription_end)
 
     
 # @app.route('/send-followup/<int:email_id>', methods=['GET'])
