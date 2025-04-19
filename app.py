@@ -1,5 +1,6 @@
 from flask import Flask, request, redirect, flash
 import sqlite3
+import sys
 import pymysql
 import smtplib
 from email.mime.text import MIMEText
@@ -978,7 +979,9 @@ def start_scheduler():
         # scheduler_thread.daemon = True
         # scheduler_thread.start()
         # print("Scheduler thread started")
-        subprocess.Popen(['python', 'scheduler.py'])
+        subprocess.Popen([sys.executable, 'scheduler.py'])
+        # subprocess.Popen(['python', 'scheduler.py'])
+        print("Scheduler.py started")
 
 @app.route('/emails')
 @login_required
