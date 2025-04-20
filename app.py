@@ -110,7 +110,7 @@ ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD')
 if not (ADMIN_EMAIL and ADMIN_PASSWORD) and is_production:
     raise ValueError("Admin email credentials must be set in production")
 
-SUBSCRIPTION_AMOUNT = int(os.environ.get('SUBSCRIPTION_AMOUNT', '40000'))
+SUBSCRIPTION_AMOUNT = int(os.environ.get('SUBSCRIPTION_AMOUNT', '1900'))
 
 # Flask-Mail Configuration
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
@@ -366,7 +366,7 @@ def payment():
 
     try:
         order_amount = SUBSCRIPTION_AMOUNT
-        order_currency = 'INR'
+        order_currency = 'USD'
         order_receipt = f"rcpt_{int(time.time())}"
 
         razorpay_order = razorpay_client.order.create({
@@ -500,7 +500,7 @@ def renew():
         return redirect(url_for('dashboard'))
     try:
         order_amount = SUBSCRIPTION_AMOUNT
-        order_currency = 'INR'
+        order_currency = 'USD'
         order_receipt = f"renew_{session['user_id']}_{int(time.time())}"
         razorpay_order = razorpay_client.order.create({
             'amount': order_amount,
