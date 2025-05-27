@@ -1130,10 +1130,14 @@ def send_followup(email_id):
             return redirect('/emails')
 
         # Handle row access depending on DB type
-        if is_production:
-            email = dict(zip([desc[0] for desc in c.description], row))
-        else:
-            email = row
+        # if is_production:
+        #     email = dict(zip([desc[0] for desc in c.description], row))
+        # else:
+        #     email = row
+
+        # row is already a dict in production if DictCursor is used
+        email = dict(row) if not is_production else row
+
 
         def send_single_followup():
             if email['followup_sent'] == 1:
