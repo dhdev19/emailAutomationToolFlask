@@ -1149,10 +1149,10 @@ def send_followup(email_id):
 
             try:
                 sender_email = email['sender_email']
-                sender_password = email['sender_password']
-                print("Email dict content:", email)
-                print(f"Logging in as: {sender_email}")
-                print(f"Password: {sender_password}")
+                # sender_password = email['sender_password']
+                # print("Email dict content:", email)
+                # print(f"Logging in as: {sender_email}")
+                # print(f"Password: {sender_password}")
 
                 recipient_email = email['recipient_email']
                 subject = f"Follow-up: {email['subject']}"
