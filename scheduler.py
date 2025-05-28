@@ -4,7 +4,8 @@ from datetime import datetime
 import sqlite3
 import smtplib
 from email.mime.text import MIMEText
-
+import pymysql
+is_production = os.environ.get('FLASK_ENV') == 'production'
 # from app import get_db_connection  # Replace 'your_app' with actual module if needed
 def get_db_connection():
     """Get database connection based on environment"""
