@@ -102,7 +102,7 @@ def followup_scheduler():
             print(f"Found {len(emails_to_followup)} emails due for follow-up")
             
             for email in emails_to_followup:
-                email_id = email['id']
+                email_id = email['user_id']
                 sender_email = email['sender_email']
                 sender_password = email['sender_password']
                 recipient_email = email['recipient_email']
