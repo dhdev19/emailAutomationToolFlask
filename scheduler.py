@@ -6,7 +6,6 @@ import smtplib
 from email.mime.text import MIMEText
 import pymysql
 is_production = os.environ.get('FLASK_ENV') == 'production'
-# from app import get_db_connection  # Replace 'your_app' with actual module if needed
 def get_db_connection():
     """Get database connection based on environment"""
     if is_production:
@@ -45,7 +44,6 @@ def followup_scheduler():
             conn = get_db_connection()
             
             # Set row_factory only if SQLite is used
-            is_production = os.environ.get('FLASK_ENV') == 'production'
             if not is_production:
                 conn.row_factory = sqlite3.Row
             
@@ -84,11 +82,6 @@ def followup_scheduler():
                     AND emails.followup_body IS NOT NULL
                     AND users.subscription_end_date >= CURRENT_TIMESTAMP
                 '''
-                    # SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body
-                    # FROM emails 
-                    # WHERE followup_date <= %s 
-                    # AND followup_sent = 0
-                    # AND followup_body IS NOT NULL
             else:
                 query = '''
                     SELECT id, sender_email, sender_password, recipient_email, recipient_name, subject, followup_body
