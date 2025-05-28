@@ -35,11 +35,11 @@ def get_db_connection():
 
 
 def followup_scheduler():
-    print("Follow-up scheduler started")
+    print("Follow-up scheduler started",flush=True)
     loop_count = 0
     while True:
         loop_count += 1
-        print(f"Scheduler check #{loop_count} at {datetime.now()}")
+        print(f"Scheduler check #{loop_count} at {datetime.now()}",flush=True)
         try:
             conn = get_db_connection()
             
@@ -50,7 +50,7 @@ def followup_scheduler():
             c = conn.cursor()
             now = datetime.now()
             current_time = now.strftime("%Y-%m-%d %H:%M:%S")
-            print(f"Current time for comparison: {current_time}")
+            print(f"Current time for comparison: {current_time}",flush=True)
 
             # Check for table existence (SQLite specific)
             if not is_production:
@@ -93,7 +93,7 @@ def followup_scheduler():
 
             c.execute(query, (current_time,))
             emails_to_followup = c.fetchall()
-            print(f"Found {len(emails_to_followup)} emails due for follow-up")
+            print(f"Found {len(emails_to_followup)} emails due for follow-up",flush=True)
             
             for email in emails_to_followup:
                 id = email['id']
