@@ -66,6 +66,7 @@ def followup_scheduler():
             if is_production:
                 query = '''
                 SELECT 
+                    emails.id,
                     emails.user_id, 
                     emails.sender_email, 
                     emails.sender_password, 
@@ -102,6 +103,7 @@ def followup_scheduler():
             print(f"Found {len(emails_to_followup)} emails due for follow-up")
             
             for email in emails_to_followup:
+                id = email['id']
                 email_id = email['user_id']
                 sender_email = email['sender_email']
                 sender_password = email['sender_password']
@@ -124,7 +126,7 @@ def followup_scheduler():
 
                     # Update followup_sent status
                     if is_production:
-                        c.execute('UPDATE emails SET followup_sent = %s WHERE id = %s', (1, email_id))
+                        c.execute('UPDATE emails SET followup_sent = %s WHERE id = %s', (1, id))
                     else:
                         c.execute('UPDATE emails SET followup_sent = ? WHERE id = ?', (1, email_id))
                     
