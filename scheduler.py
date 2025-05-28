@@ -38,7 +38,7 @@ def followup_scheduler():
             if is_production:
                 query = '''
                 SELECT 
-                    emails.id, 
+                    emails.user_id, 
                     emails.sender_email, 
                     emails.sender_password, 
                     emails.recipient_email, 
@@ -48,7 +48,7 @@ def followup_scheduler():
                 FROM 
                     emails
                 JOIN 
-                    users ON emails.id = users.id
+                    users ON emails.user_id = users.id
                 WHERE 
                     emails.followup_date <= %s
                     AND emails.followup_sent = 0
