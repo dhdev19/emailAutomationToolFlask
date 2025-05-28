@@ -5,7 +5,34 @@ import sqlite3
 import smtplib
 from email.mime.text import MIMEText
 
-from app import get_db_connection  # Replace 'your_app' with actual module if needed
+# from app import get_db_connection  # Replace 'your_app' with actual module if needed
+def get_db_connection():
+    """Get database connection based on environment"""
+    if is_production:
+        db_user = os.environ.get('DB_USER')
+        db_password = os.environ.get('DB_PASSWORD')
+        db_host = os.environ.get('DB_HOST', 'localhost')
+        db_name = os.environ.get('DB_NAME')
+        db_port = os.environ.get('DB_PORT', 3306)
+        
+        if not all([db_user, db_password, db_name]):
+            raise ValueError("Database credentials must be set in production")
+        
+        conn = pymysql.connect(
+            host=db_host,
+            user=db_user,
+            password=db_password,
+            database=db_name,
+            port=int(db_port),
+            cursorclass=pymysql.cursors.DictCursor
+        )
+    else:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+
+    return conn
+
+
 
 def followup_scheduler():
     print("Follow-up scheduler started")
