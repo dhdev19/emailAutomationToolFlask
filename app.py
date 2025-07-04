@@ -41,7 +41,7 @@ from email import encoders
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_wtf.csrf import CSRFProtect
-
+import re
 import threading
 from datetime import datetime
 from flask import session, render_template
@@ -349,6 +349,22 @@ def register():
             flash('Please provide both full name and email', 'error')
             return render_template('register.html')
 
+        full_name = full_name.strip()
+        email = email.strip().lower()
+
+        email_regex = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+        if not re.match(email_regex, email):
+            flash('Invalid email format', 'error')
+            return render_template('register.html')
+
+        
+        conn = get_db_connection()
+        user = conn.execute('SELECT email FROM users WHERE email = ?', (email,)).fetchone()
+        conn.close()
+        if user:
+            flash('User with this email already exists, please login or use a different email', 'error')
+            return render_template('register.html')
+        
         session['temp_user_data'] = {'full_name': full_name, 'email': email}
         return redirect(url_for('payment'))
 
