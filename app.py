@@ -359,7 +359,9 @@ def register():
 
         
         conn = get_db_connection()
-        user = conn.execute('SELECT email FROM users WHERE email = ?', (email,)).fetchone()
+        cursor = conn.cursor()
+        cursor.execute('SELECT email FROM users WHERE email = %s', (email,))
+        user = cursor.fetchone()
         conn.close()
         if user:
             flash('User with this email already exists, please login or use a different email', 'error')
